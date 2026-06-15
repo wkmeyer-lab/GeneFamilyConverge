@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "convgeno"
+version = "0.1.0"
+description = "Reusable utilities for gene family copy number pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "biopython",
+    "ete3",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

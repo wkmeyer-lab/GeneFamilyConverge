@@ -1,0 +1,24 @@
+name: genefam-pipeline
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # Python core
+  - python>=3.10
+  - pip
+  - pyyaml
+  - pytest
+
+  # Bioinformatics CLI tools (confirmed)
+  - orthofinder
+  - cafe5
+  # BadiRate: not on bioconda — see docs in Src/Reu/python/src/convgeno/external/badirate.py
+
+  # Python libraries
+  - biopython        # FASTA I/O via SeqIO
+  - ete3             # Tree manipulation
+
+  # R (managed primarily via renv, but base R from conda)
+  - r-base>=4.3

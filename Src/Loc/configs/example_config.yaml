@@ -1,0 +1,43 @@
+# Pipeline configuration
+# Copy this to a new file for each analysis run.
+
+project:
+  name: example_run
+  description: "Pilot run on VGP mammal subset"
+
+inputs:
+  proteome_dir: Data/raw/proteomes
+  species_tree: Data/raw/trees/species_tree.nwk
+  phenotype_table: Data/raw/phenotypes/phenotypes.tsv
+  # Source format determines how FASTA headers are parsed.
+  # Supported: ensembl (more will be added as needed)
+  source_format: ensembl
+
+outputs:
+  interim_dir: Data/interim
+  processed_dir: Data/processed
+  log_dir: Data/logs
+  manifest_dir: Data/manifests
+
+isoform_filter:
+  # Strategy for picking one protein per gene.
+  strategy: longest
+
+orthofinder:
+  enabled: true
+  threads: 8
+  extra_args: ""
+
+cafe:
+  enabled: true
+  # Number of discrete rate categories for gamma model
+  n_gamma_cats: 5
+  extra_args: ""
+
+badirate:
+  enabled: true
+  extra_args: ""
+
+runtime:
+  # If true, overwrite existing intermediate outputs
+  overwrite: false

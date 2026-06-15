@@ -1,0 +1,23 @@
+# Tool paths
+# Swap this file when moving between local dev and HPC.
+# On HPC you may need full paths or module-loaded commands.
+
+# --- Local (Mac / Linux workstation) ---
+orthofinder:
+  command: orthofinder
+
+cafe:
+  command: cafe5
+
+badirate:
+  command: BadiRate.pl
+  # BadiRate is a Perl script. Adjust path after installation.
+  # Example HPC path: /share/apps/badirate/1.35/BadiRate.pl
+
+# --- HPC example (uncomment and adjust) ---
+# orthofinder:
+#   command: /share/apps/orthofinder/2.5.5/orthofinder
+# cafe:
+#   command: /share/apps/cafe5/5.1.0/bin/cafe5
+# badirate:
+#   command: /share/apps/badirate/1.35/BadiRate.pl
