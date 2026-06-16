@@ -1,0 +1,113 @@
+# =============================================================================
+# GeneFamilyConverge — convergent-evolution genomics pipeline
+# =============================================================================
+
+# --- OS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing & linting
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.hypothesis/
+
+# --- R / renv ---
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+.Rproj.user/
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# --- Conda ---
+.conda/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# --- Pipeline data (see Data/README.md) ---
+# Track manifests/ and .gitkeep placeholders; ignore generated/large files.
+
+Data/raw/*
+!Data/raw/.gitkeep
+!Data/raw/README.md
+
+Data/interim/**/*
+!Data/interim/**/.gitkeep
+
+Data/processed/**/*
+!Data/processed/**/.gitkeep
+
+Data/logs/**/*
+!Data/logs/**/.gitkeep
+
+# --- HPC / batch jobs ---
+slurm-*.out
+slurm-*.err
+*.sbatch.o*
+*.sbatch.e*
+
+# --- Report outputs (from R Markdown) ---
+Src/Loc/reports/*.html
+
+# --- Secrets & local overrides ---
+.env
+.env.*
+*.local.yaml
+*.local.yml
+tool_paths.local.yaml
