@@ -26,6 +26,7 @@ import bz2
 import gzip
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import (
     Dict,
@@ -319,6 +320,174 @@ def _write_fasta_record(fh: TextIO, header: str, sequence: str) -> None:
         fh.write("\n")
 
 
+def _read_record_at(fh: TextIO, offset: int) -> tuple[str, str]:
+    """Seek to *offset* in a text-mode handle and read one FASTA record.
+
+    Returns ``(header, sequence)`` where *header* has no leading ``>``.
+    """
+    fh.seek(offset)
+    header_line = fh.readline()
+    if not header_line or not header_line.startswith(">"):
+        raise ValueError(
+            f"Expected '>' at offset {offset}, got: {header_line!r}"
+        )
+    header = header_line.rstrip("\n\r")[1:]
+    seq_parts: list[str] = []
+    while True:
+        peek = fh.tell()
+        line = fh.readline()
+        if not line or line.startswith(">"):
+            fh.seek(peek)
+            break
+        seq_parts.append(line.rstrip("\n\r"))
+    return header, "".join(seq_parts)
+
+
+def _filter_low_memory(
+    input_paths: List[Path],
+    output_path: Path,
+    header_format: HeaderFormat,
+    on_duplicate: Literal["error", "warn", "skip"],
+) -> dict:
+    """Two-pass low-memory longest-isoform filter.
+
+    Compressed inputs are decompressed to a temporary directory
+    (gzip / bz2 streams are not seekable).  Pass 1 records only
+    ``gene_id → (length, file_index, byte_offset)``; no sequences
+    are held in memory.  Pass 2 seeks to winning offsets and writes.
+    """
+    with tempfile.TemporaryDirectory(prefix="convgeno_") as tmp_str:
+        tmp_dir = Path(tmp_str)
+
+        # --- Prepare seekable plain-text copies ---
+        seekable: list[Path] = []
+        for i, p in enumerate(input_paths):
+            p = Path(p)
+            if detect_compression(p) is not None:
+                decomp = tmp_dir / f"decomp_{i}.fa"
+                logger.info("Decompressing %s → %s", p.name, decomp.name)
+                with open_fasta(p) as src, \
+                     open(decomp, "w", encoding="utf-8") as dst:
+                    for line in src:
+                        dst.write(line)
+                seekable.append(decomp)
+            else:
+                seekable.append(p)
+
+        # --- PASS 1: scan gene IDs, lengths, file offsets ---
+        best: Dict[str, tuple[int, int, int]] = {}  # gene → (len, fidx, off)
+        seen_accessions: set[str] = set()
+        unidentified_offsets: list[tuple[int, int]] = []
+
+        total_records = 0
+        unidentified_count = 0
+        resolved_fmt: Optional[HeaderFormat] = (
+            None if header_format == "auto" else header_format
+        )
+
+        for file_idx, fpath in enumerate(seekable):
+            logger.info("Pass 1 — scanning %s", fpath.name)
+            with open(fpath, "r", encoding="utf-8") as fh:
+                while True:
+                    record_offset = fh.tell()
+                    line = fh.readline()
+                    if not line:
+                        break
+                    if not line.startswith(">"):
+                        continue
+
+                    total_records += 1
+                    header = line.rstrip("\n\r")[1:]
+
+                    # --- duplicate check ---
+                    accession = header.split()[0]
+                    if accession in seen_accessions:
+                        msg = (
+                            f"Duplicate accession '{accession}' "
+                            f"in {fpath.name}"
+                        )
+                        if on_duplicate == "error":
+                            raise ValueError(msg)
+                        if on_duplicate == "warn":
+                            logger.warning(msg)
+                        # Advance past sequence lines.
+                        while True:
+                            peek = fh.tell()
+                            sl = fh.readline()
+                            if not sl or sl.startswith(">"):
+                                fh.seek(peek)
+                                break
+                        continue
+                    seen_accessions.add(accession)
+
+                    # --- auto-detect format from first record ---
+                    if resolved_fmt is None:
+                        resolved_fmt = detect_header_format(header)
+                        logger.info(
+                            "Auto-detected header format: %s", resolved_fmt
+                        )
+
+                    gene_id = parse_gene_id(header, resolved_fmt)
+
+                    # Count sequence length WITHOUT storing sequence.
+                    seq_len = 0
+                    while True:
+                        peek = fh.tell()
+                        sl = fh.readline()
+                        if not sl or sl.startswith(">"):
+                            fh.seek(peek)
+                            break
+                        seq_len += len(sl.rstrip("\n\r"))
+
+                    if gene_id is None:
+                        unidentified_count += 1
+                        unidentified_offsets.append(
+                            (file_idx, record_offset)
+                        )
+                    elif gene_id not in best or seq_len > best[gene_id][0]:
+                        best[gene_id] = (
+                            seq_len, file_idx, record_offset,
+                        )
+
+        # --- PASS 2: seek to winners, read, write ---
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        handles: list[TextIO] = []
+        try:
+            handles = [
+                open(p, "r", encoding="utf-8") for p in seekable
+            ]
+            output_records = 0
+            with open(output_path, "w", encoding="utf-8") as out:
+                for gene_id in sorted(best):
+                    _, fidx, off = best[gene_id]
+                    hdr, seq = _read_record_at(handles[fidx], off)
+                    _write_fasta_record(out, hdr, seq)
+                    output_records += 1
+
+                for fidx, off in unidentified_offsets:
+                    hdr, seq = _read_record_at(handles[fidx], off)
+                    _write_fasta_record(out, hdr, seq)
+                    output_records += 1
+        finally:
+            for h in handles:
+                h.close()
+
+    logger.info(
+        "Low-memory: %d records -> %d genes + %d unidentified = %d written",
+        total_records, len(best), unidentified_count, output_records,
+    )
+
+    return {
+        "total_records": total_records,
+        "unique_genes": len(best),
+        "unidentified": unidentified_count,
+        "output_records": output_records,
+        "detected_format": resolved_fmt,
+    }
+
+
 def filter_longest_isoforms(
     input_paths: List[Path],
     output_path: Path,
@@ -356,8 +525,10 @@ def filter_longest_isoforms(
         Policy for duplicate accessions (first whitespace-delimited
         token).  ``'error'`` (the default) raises ``ValueError``.
     memory_mode : ``'normal'`` | ``'low'``
-        ``'normal'``: single-pass, dict in memory (v1 default).
-        ``'low'``: two-pass offset-based (not yet implemented).
+        ``'normal'``: single-pass, dict in memory.
+        ``'low'``: two-pass, offset-based.  Compressed inputs are
+        decompressed to a temp directory first (gzip/bz2 streams
+        are not seekable).  Sequences are never held in memory.
 
     Returns
     -------
@@ -366,9 +537,8 @@ def filter_longest_isoforms(
            "output_records", "detected_format" }``
     """
     if memory_mode == "low":
-        raise NotImplementedError(
-            "Low-memory two-pass mode is planned but not yet implemented. "
-            "Use memory_mode='normal' (the default)."
+        return _filter_low_memory(
+            input_paths, output_path, header_format, on_duplicate,
         )
 
     # gene_id → (seq_length, original_header, sequence)

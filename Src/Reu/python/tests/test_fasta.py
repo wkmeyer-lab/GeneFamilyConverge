@@ -367,14 +367,86 @@ class TestDuplicateHandling:
 # ===================================================================
 
 
-class TestMemoryMode:
-    def test_low_not_implemented(self, ensembl_fasta_file: Path, tmp_path: Path):
-        with pytest.raises(NotImplementedError, match="Low-memory"):
+class TestLowMemoryMode:
+    """Verify that memory_mode='low' produces identical results to 'normal'."""
+
+    def test_ensembl_matches_normal(self, ensembl_fasta_file: Path, tmp_path: Path):
+        out_normal = tmp_path / "normal.fa"
+        out_low = tmp_path / "low.fa"
+        sn = filter_longest_isoforms(
+            [ensembl_fasta_file], out_normal, memory_mode="normal",
+        )
+        sl = filter_longest_isoforms(
+            [ensembl_fasta_file], out_low, memory_mode="low",
+        )
+        assert sn == sl
+        assert out_normal.read_text() == out_low.read_text()
+
+    def test_ncbi_matches_normal(self, ncbi_fasta_file: Path, tmp_path: Path):
+        out_normal = tmp_path / "normal.faa"
+        out_low = tmp_path / "low.faa"
+        sn = filter_longest_isoforms(
+            [ncbi_fasta_file], out_normal, memory_mode="normal",
+        )
+        sl = filter_longest_isoforms(
+            [ncbi_fasta_file], out_low, memory_mode="low",
+        )
+        assert sn == sl
+        assert out_normal.read_text() == out_low.read_text()
+
+    def test_gzip_input(self, gzip_fasta_file: Path, tmp_path: Path):
+        out = tmp_path / "low_gz.fa"
+        stats = filter_longest_isoforms(
+            [gzip_fasta_file], out, memory_mode="low",
+        )
+        assert stats["unique_genes"] == 2
+        assert out.exists()
+
+    def test_bz2_input(self, bz2_fasta_file: Path, tmp_path: Path):
+        out = tmp_path / "low_bz2.fa"
+        stats = filter_longest_isoforms(
+            [bz2_fasta_file], out, memory_mode="low",
+        )
+        assert stats["unique_genes"] == 2
+
+    def test_multi_file(self, split_proteome_files: list[Path], tmp_path: Path):
+        out_normal = tmp_path / "normal.fa"
+        out_low = tmp_path / "low.fa"
+        sn = filter_longest_isoforms(
+            split_proteome_files, out_normal, memory_mode="normal",
+        )
+        sl = filter_longest_isoforms(
+            split_proteome_files, out_low, memory_mode="low",
+        )
+        assert sn == sl
+        assert out_normal.read_text() == out_low.read_text()
+
+    def test_duplicate_error(self, duplicate_fasta_file: Path, tmp_path: Path):
+        with pytest.raises(ValueError, match="Duplicate accession"):
             filter_longest_isoforms(
-                input_paths=[ensembl_fasta_file],
-                output_path=tmp_path / "out.fa",
+                [duplicate_fasta_file],
+                tmp_path / "x.fa",
                 memory_mode="low",
+                on_duplicate="error",
             )
+
+    def test_duplicate_warn(self, duplicate_fasta_file: Path, tmp_path: Path):
+        out = tmp_path / "low_warn.fa"
+        stats = filter_longest_isoforms(
+            [duplicate_fasta_file], out,
+            memory_mode="low", on_duplicate="warn",
+        )
+        assert stats["output_records"] == 1
+
+    def test_unidentified_preserved(
+        self, ensembl_no_gene_file: Path, tmp_path: Path,
+    ):
+        out = tmp_path / "low_unid.fa"
+        stats = filter_longest_isoforms(
+            [ensembl_no_gene_file], out, memory_mode="low",
+        )
+        assert stats["unidentified"] == 1
+        assert stats["output_records"] == 1
 
 
 # ===================================================================
