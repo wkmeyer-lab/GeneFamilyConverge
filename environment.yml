@@ -1,0 +1,34 @@
+# Conda environment for the convergent-evolution genomics pipeline.
+#
+# Create:   conda env create -f environment.yml
+# Activate: conda activate convgeno
+# Update:   conda env update -f environment.yml --prune
+#
+# After activating, install the convgeno package in editable mode:
+#   pip install -e Src/Reu/python/
+
+name: convgeno
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python >=3.10,<3.13
+  - biopython >=1.80
+  - numpy >=1.24
+
+  # --- testing & linting ---
+  - pytest >=7.0
+  - pytest-cov
+
+  # --- pipeline tools (uncomment as needed) ---
+  # - orthofinder >=2.5
+  # - blast >=2.14
+  # - hmmer >=3.3
+  # - snakemake >=8.0
+
+  # --- pip-only packages ---
+  - pip
+  - pip:
+      - -e Src/Reu/python/
