@@ -90,20 +90,11 @@ Data/raw/*
 Data/interim/**/*
 !Data/interim/**/.gitkeep
 
-Data/processed/**/*
-!Data/processed/**/.gitkeep
-
-Data/logs/**/*
-!Data/logs/**/.gitkeep
-
 # --- HPC / batch jobs ---
 slurm-*.out
 slurm-*.err
 *.sbatch.o*
 *.sbatch.e*
-
-# --- Report outputs (from R Markdown) ---
-Src/Loc/reports/*.html
 
 # --- Secrets & local overrides ---
 .env
