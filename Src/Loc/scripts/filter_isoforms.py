@@ -6,17 +6,17 @@ Two modes of operation
 ----------------------
 **Directory mode** (batch — one file per species)::
 
-    python step01_filter_isoforms.py dir data/raw/proteomes/ data/interim/primary_transcripts/
+    python filter_isoforms.py dir data/raw/proteomes/ data/interim/primary_transcripts/
 
 **File mode** (single species, one or more input files)::
 
-    python step01_filter_isoforms.py files \\
+    python filter_isoforms.py files \\
         -i data/raw/proteomes/Homo_sapiens.pep.all.fa.gz \\
         -o data/interim/primary_transcripts/Homo_sapiens.fa
 
 File mode also handles per-chromosome downloads for a single species::
 
-    python step01_filter_isoforms.py files \\
+    python filter_isoforms.py files \\
         -i proteome_chr1.fa.gz proteome_chr2.fa.gz \\
         -o data/interim/primary_transcripts/species.fa
 
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="step01_filter_isoforms",
+        prog="filter_isoforms",
         description="Filter proteome FASTA files to the longest isoform per gene.",
     )
 

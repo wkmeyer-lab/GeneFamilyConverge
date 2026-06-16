@@ -504,10 +504,9 @@ def filter_longest_isoforms(
     dict.  Peak memory ≈ total size of the filtered output (typically
     10–15 MB for a mammalian proteome).  The file is read exactly once.
 
-    ``memory_mode='low'`` is reserved for a future two-pass strategy
+    ``memory_mode='low'`` is for a two-pass strategy
     that records only file offsets on the first pass.  It will require
-    decompressing twice for gzip/bz2 inputs.  Passing ``'low'`` today
-    raises :class:`NotImplementedError`.
+    decompressing twice for gzip/bz2 inputs. 
 
     Parameters
     ----------
