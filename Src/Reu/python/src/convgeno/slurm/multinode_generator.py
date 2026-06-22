@@ -172,16 +172,46 @@ exit 0
 
 
 def generate_search_array_script(
-    config: PipelineConfig, commands_per_task: int = 50
+    config: PipelineConfig,
+    commands_per_task: int = 50,
+    array_max: int | None = None,
 ) -> str:
     """Generate SLURM array job that executes DIAMOND/BLAST search commands.
 
     Each array task runs ``commands_per_task`` commands from the file
-    produced by the prepare phase. The array upper bound is set
-    generously (``0-9999``); tasks that have no work simply exit 0.
+    produced by the prepare phase. The array upper bound (``array_max``)
+    must be computed by the caller from the actual input size — hard-
+    coding a large value (e.g. ``0-9999``) is rejected by many SLURM
+    clusters with ``Invalid job array specification``.
+
+    Parameters
+    ----------
+    config:
+        The pipeline configuration. Must include an ``orthofinder``
+        section.
+    commands_per_task:
+        How many DIAMOND/BLAST commands each array task executes.
+        Must be > 0.
+    array_max:
+        Inclusive upper bound for the SLURM array (the script will have
+        ``#SBATCH --array=0-<array_max>``). Required; must be a
+        non-negative integer. The CLI computes this from the number of
+        input FASTA files so the array size is deterministic and tied
+        to validation.
+
+    Raises
+    ------
+    ValueError
+        If ``config.orthofinder`` is missing, ``commands_per_task`` is
+        not positive, or ``array_max`` is ``None`` or negative.
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None
+
+    if commands_per_task <= 0:
+        raise ValueError("commands_per_task must be positive")
+    if array_max is None or array_max < 0:
+        raise ValueError("array_max must be a non-negative integer")
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = _build_sbatch_header(
@@ -194,7 +224,7 @@ def generate_search_array_script(
             "--time": config.slurm.time_limit,
             "--output": config.slurm.output_pattern.replace("%j", "%A_%a"),
             "--error": config.slurm.error_pattern.replace("%j", "%A_%a"),
-            "--array": "0-9999",
+            "--array": f"0-{array_max}",
         },
     )
 

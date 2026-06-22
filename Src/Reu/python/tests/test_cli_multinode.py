@@ -40,14 +40,14 @@ def sample_config_file(tmp_path: Path) -> dict:
     return {"config_path": str(config_path), "tmp_path": tmp_path}
 
 
-def _mock_validation_pass() -> MagicMock:
+def _mock_validation_pass(num_species: int = 1) -> MagicMock:
     validation = MagicMock()
     validation.is_valid.return_value = True
     validation.errors = []
     validation.warnings = []
-    validation.fasta_files = [Path("a.fa")]
+    validation.fasta_files = [Path(f"species_{i}.faa") for i in range(num_species)]
     validation.summary.return_value = (
-        "Validation passed.\n  FASTA files found: 1"
+        f"Validation passed.\n  FASTA files found: {num_species}"
     )
     return validation
 
@@ -117,3 +117,40 @@ class TestRunSubmitMultinode:
             skip_confirm=False,
         )
         mock_sbatch.assert_not_called()
+
+
+class TestArraySizeComputation:
+    @patch(
+        "convgeno.cli.orthofinder_cmd.validate_orthofinder_inputs",
+        return_value=_mock_validation_pass(num_species=114),
+    )
+    def test_114_species_yields_array_0_to_259(
+        self, _mock_validate, sample_config_file
+    ):
+        # 114 species → 114*114 = 12996 commands.
+        # With commands_per_task=50, ceil(12996/50) = 260 tasks,
+        # giving #SBATCH --array=0-259.
+        f = sample_config_file
+        result = run_generate_multinode(
+            config_path=f["config_path"],
+            script_dir=str(f["tmp_path"] / "scripts"),
+        )
+        search_script = result["search"].read_text(encoding="utf-8")
+        assert "#SBATCH --array=0-259" in search_script
+        assert "#SBATCH --array=0-9999" not in search_script
+
+    @patch(
+        "convgeno.cli.orthofinder_cmd.validate_orthofinder_inputs",
+        return_value=_mock_validation_pass(num_species=4),
+    )
+    def test_4_species_yields_small_array(
+        self, _mock_validate, sample_config_file
+    ):
+        # 4 species → 16 commands → ceil(16/50) = 1 task → array=0-0.
+        f = sample_config_file
+        result = run_generate_multinode(
+            config_path=f["config_path"],
+            script_dir=str(f["tmp_path"] / "scripts"),
+        )
+        search_script = result["search"].read_text(encoding="utf-8")
+        assert "#SBATCH --array=0-0" in search_script

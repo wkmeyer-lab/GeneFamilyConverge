@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -151,6 +152,12 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
     """
     config = PipelineConfig.load(config_path)
 
+    commands_per_task = 50
+    # Defensive default that yields a 1-task array. Only used if
+    # orthofinder is missing from config — generate_search_array_script
+    # will then raise ValueError on the missing orthofinder block first.
+    array_max = 0
+
     if config.orthofinder is not None:
         validation = validate_orthofinder_inputs(config.orthofinder.input_dir)
         print(validation.summary())
@@ -164,8 +171,24 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
             print(f"ERROR: {exc}")
             sys.exit(1)
 
+        # Compute the SLURM array range from the actual input size.
+        # OrthoFinder runs all-vs-all pairwise searches, so the upper
+        # bound on the number of search commands is num_species^2.
+        num_species = len(validation.fasta_files)
+        estimated_commands = num_species * num_species
+        array_task_count = max(math.ceil(estimated_commands / commands_per_task), 1)
+        array_max = array_task_count - 1
+
+        print(f"Estimated OrthoFinder search commands: {estimated_commands}")
+        print(f"Commands per array task: {commands_per_task}")
+        print(f"Generated SLURM array range: 0-{array_max}")
+
     prepare_content = generate_prepare_script(config)
-    search_content = generate_search_array_script(config)
+    search_content = generate_search_array_script(
+        config,
+        commands_per_task=commands_per_task,
+        array_max=array_max,
+    )
     resume_content = generate_resume_script(config)
 
     script_dir_path = Path(script_dir)
