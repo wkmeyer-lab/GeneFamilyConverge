@@ -101,59 +101,64 @@ conda activate {config.conda_env}
 
 INPUT_DIR="{config.orthofinder.input_dir}"
 OUTPUT_DIR="{config.orthofinder.output_dir}"
-COMMANDS_FILE="$OUTPUT_DIR/diamond_commands.txt"
+SEARCH_PROGRAM="{config.orthofinder.sequence_search}"
 
-# OrthoFinder refuses to run when the non-default -o output directory
-# already exists. Create only the PARENT directory, and fail loudly if
-# the target output directory itself is present.
-mkdir -p "$(dirname "$OUTPUT_DIR")"
+# All auxiliary files (log, commands list, WorkingDirectory pointer)
+# live in the PARENT directory, not in $OUTPUT_DIR itself. OrthoFinder
+# refuses to run if its -o output directory already exists, so we must
+# not pre-create $OUTPUT_DIR and must not redirect any output into it
+# before OrthoFinder has created it.
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+
+mkdir -p "$OUTPUT_PARENT"
 
 if [ -e "$OUTPUT_DIR" ]; then
     echo "ERROR: OrthoFinder output directory already exists: $OUTPUT_DIR"
-    echo "Choose a fresh output_dir in pipeline_config.yaml."
+    echo "Choose a fresh output_dir in the config."
     exit 1
 fi
 
+PREPARE_LOG="$OUTPUT_PARENT/${{RUN_NAME}}_prepare_full_stdout.log"
+COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
+WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
+
 # Run OrthoFinder prepare phase. -op stops after writing the search
-# commands and exits without running them.
-orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op \\
-    -S {config.orthofinder.sequence_search} \\
-    > "$OUTPUT_DIR/prepare_full_stdout.log" 2>&1
+# commands and exits without running them. stdout is redirected to a
+# log file in $OUTPUT_PARENT (which already exists), NOT in $OUTPUT_DIR.
+orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op -S "$SEARCH_PROGRAM" > "$PREPARE_LOG" 2>&1
 
 PREPARE_EXIT=$?
 if [ $PREPARE_EXIT -ne 0 ]; then
     echo "ERROR: OrthoFinder prepare phase failed with exit code $PREPARE_EXIT"
-    cat "$OUTPUT_DIR/prepare_full_stdout.log"
+    cat "$PREPARE_LOG"
     exit $PREPARE_EXIT
 fi
 
 # Extract search commands from OrthoFinder stdout. Diamond commands
 # start with "diamond"; BLAST commands start with "blastp" or "makeblastdb".
-grep -E "^(diamond|blastp|makeblastdb)" "$OUTPUT_DIR/prepare_full_stdout.log" > "$COMMANDS_FILE" || true
-
-# OrthoFinder sometimes writes the commands list inside WorkingDirectory/.
-# Use it as a fallback if the grep above produced nothing.
-WORK_DIR=$(find "$OUTPUT_DIR" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
-if [ -n "$WORK_DIR" ]; then
-    for cmd_file in "$WORK_DIR"/Commands_*.txt; do
-        if [ -f "$cmd_file" ] && [ ! -s "$COMMANDS_FILE" ]; then
-            cp "$cmd_file" "$COMMANDS_FILE"
-            echo "Found commands file: $cmd_file"
-        fi
-    done
-fi
+grep -E "^(diamond|blastp|makeblastdb)" "$PREPARE_LOG" > "$COMMANDS_FILE" || true
 
 NUM_COMMANDS=$(wc -l < "$COMMANDS_FILE")
 echo "Extracted $NUM_COMMANDS search commands to $COMMANDS_FILE"
 
 if [ "$NUM_COMMANDS" -eq 0 ]; then
     echo "ERROR: No search commands were extracted."
-    echo "Check $OUTPUT_DIR/prepare_full_stdout.log for details."
+    echo "Check prepare log: $PREPARE_LOG"
     exit 1
 fi
 
-# Persist the WorkingDirectory path for the resume script.
-echo "$WORK_DIR" > "$OUTPUT_DIR/working_dir_path.txt"
+# Locate the WorkingDirectory OrthoFinder created and persist its path
+# for the resume script.
+WORK_DIR=$(find "$OUTPUT_DIR" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
+
+if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+    echo "ERROR: Could not find OrthoFinder WorkingDirectory under $OUTPUT_DIR"
+    echo "Check prepare log: $PREPARE_LOG"
+    exit 1
+fi
+
+echo "$WORK_DIR" > "$WORK_DIR_FILE"
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -252,7 +257,9 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate {config.conda_env}
 
 OUTPUT_DIR="{config.orthofinder.output_dir}"
-COMMANDS_FILE="$OUTPUT_DIR/diamond_commands.txt"
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
 COMMANDS_PER_TASK={commands_per_task}
 
 if [ ! -f "$COMMANDS_FILE" ]; then
@@ -371,18 +378,23 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate {config.conda_env}
 
 OUTPUT_DIR="{config.orthofinder.output_dir}"
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
 
-# Find the WorkingDirectory created by the prepare phase.
-WORK_DIR_FILE="$OUTPUT_DIR/working_dir_path.txt"
-if [ -f "$WORK_DIR_FILE" ]; then
-    WORK_DIR=$(cat "$WORK_DIR_FILE")
-else
-    WORK_DIR=$(find "$OUTPUT_DIR" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
+# The prepare script wrote the WorkingDirectory path to a pointer file
+# in $OUTPUT_PARENT. Read it directly — no find-fallback, since a
+# missing pointer means the prepare job failed and we should abort.
+if [ ! -f "$WORK_DIR_FILE" ]; then
+    echo "ERROR: WorkingDirectory pointer not found: $WORK_DIR_FILE"
+    echo "The prepare job may have failed."
+    exit 1
 fi
 
+WORK_DIR="$(cat "$WORK_DIR_FILE")"
+
 if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
-    echo "ERROR: Could not find OrthoFinder WorkingDirectory in $OUTPUT_DIR"
-    echo "The prepare job may have failed."
+    echo "ERROR: WorkingDirectory not found or unreadable: $WORK_DIR"
     exit 1
 fi
 

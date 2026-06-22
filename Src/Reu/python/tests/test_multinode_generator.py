@@ -6,6 +6,9 @@ Run with:  pytest tests/test_multinode_generator.py -v
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from convgeno.external.config import OrthoFinderConfig
@@ -68,13 +71,48 @@ class TestPrepareScript:
         # OrthoFinder refuses to run with an existing -o directory.
         # Only the parent should be created.
         script = generate_prepare_script(sample_config)
-        assert 'mkdir -p "$(dirname "$OUTPUT_DIR")"' in script
         assert 'mkdir -p "$OUTPUT_DIR"' not in script
+        assert 'mkdir -p "$OUTPUT_PARENT"' in script
 
     def test_fails_loudly_if_output_dir_exists(self, sample_config):
         script = generate_prepare_script(sample_config)
         assert 'if [ -e "$OUTPUT_DIR" ]' in script
         assert "already exists" in script
+
+    def test_aux_files_live_in_parent_not_in_output_dir(self, sample_config):
+        # Bug: bash opens redirect targets before exec'ing the command,
+        # so any "> $OUTPUT_DIR/foo" fails because OrthoFinder hasn't
+        # created $OUTPUT_DIR yet. All aux files must live in
+        # $OUTPUT_PARENT/${RUN_NAME}_*.
+        script = generate_prepare_script(sample_config)
+        assert (
+            'PREPARE_LOG="$OUTPUT_PARENT/${RUN_NAME}_prepare_full_stdout.log"'
+            in script
+        )
+        assert (
+            'COMMANDS_FILE="$OUTPUT_PARENT/${RUN_NAME}_diamond_commands.txt"'
+            in script
+        )
+        assert (
+            'WORK_DIR_FILE="$OUTPUT_PARENT/${RUN_NAME}_working_dir_path.txt"'
+            in script
+        )
+        assert '> "$PREPARE_LOG" 2>&1' in script
+
+    def test_no_writes_into_output_dir_before_orthofinder(self, sample_config):
+        # Belt and suspenders: assert none of the previously buggy
+        # paths reappear via a copy/paste regression.
+        script = generate_prepare_script(sample_config)
+        assert '"$OUTPUT_DIR/prepare_full_stdout.log"' not in script
+        assert '"$OUTPUT_DIR/diamond_commands.txt"' not in script
+        assert '"$OUTPUT_DIR/working_dir_path.txt"' not in script
+
+    def test_passes_search_program_to_prepare(self, sample_config):
+        # Prepare must invoke OrthoFinder with -S so the WorkingDirectory
+        # is configured for the right search program. Resume relies on this.
+        script = generate_prepare_script(sample_config)
+        assert 'SEARCH_PROGRAM="diamond"' in script
+        assert '-op -S "$SEARCH_PROGRAM"' in script
 
 
 def _search_script(config, **kwargs):
@@ -93,6 +131,17 @@ class TestSearchArrayScript:
 
     def test_reads_commands_file(self, sample_config):
         assert "diamond_commands.txt" in _search_script(sample_config)
+
+    def test_reads_commands_from_parent_not_output_dir(self, sample_config):
+        # Must match the path prepare writes to. The previous bug had
+        # both prepare and search referencing $OUTPUT_DIR/diamond_commands.txt
+        # which fails on the prepare side.
+        script = _search_script(sample_config)
+        assert (
+            'COMMANDS_FILE="$OUTPUT_PARENT/${RUN_NAME}_diamond_commands.txt"'
+            in script
+        )
+        assert 'COMMANDS_FILE="$OUTPUT_DIR/diamond_commands.txt"' not in script
 
     def test_uses_slurm_array_task_id(self, sample_config):
         assert "SLURM_ARRAY_TASK_ID" in _search_script(sample_config)
@@ -165,6 +214,16 @@ class TestResumeScript:
     def test_finds_working_directory(self, sample_config):
         assert "WorkingDirectory" in generate_resume_script(sample_config)
 
+    def test_reads_workdir_from_parent_not_output_dir(self, sample_config):
+        # Must match the path prepare writes to.
+        script = generate_resume_script(sample_config)
+        assert (
+            'WORK_DIR_FILE="$OUTPUT_PARENT/${RUN_NAME}_working_dir_path.txt"'
+            in script
+        )
+        assert 'WORK_DIR_FILE="$OUTPUT_DIR/working_dir_path.txt"' not in script
+        assert 'WORK_DIR="$(cat "$WORK_DIR_FILE")"' in script
+
 
 class TestCrossCutting:
     def _all_scripts(self, config):
@@ -181,6 +240,31 @@ class TestCrossCutting:
     def test_all_scripts_activate_conda(self, sample_config):
         for script in self._all_scripts(sample_config):
             assert "conda activate convgeno" in script
+
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash not installed; cannot syntax-check generated scripts",
+    )
+    def test_all_scripts_are_syntactically_valid_bash(
+        self, sample_config, tmp_path
+    ):
+        # Regression guard: every previous prepare-script bug was a bash
+        # design error (mkdir/redirect order, wrong flags) that string-
+        # matching tests missed. At minimum, every generated script must
+        # parse under `bash -n`.
+        names = ["prepare.sh", "search.sh", "resume.sh"]
+        for name, script in zip(names, self._all_scripts(sample_config)):
+            path = tmp_path / name
+            path.write_text(script)
+            result = subprocess.run(
+                ["bash", "-n", str(path)],
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, (
+                f"Generated {name} has bash syntax errors:\n"
+                f"{result.stderr}\n---script---\n{script}"
+            )
 
     def test_raises_without_orthofinder_config(self):
         config = PipelineConfig(
