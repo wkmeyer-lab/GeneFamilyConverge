@@ -18,13 +18,18 @@ from convgeno.slurm.config import PipelineConfig, SlurmConfig
 
 @pytest.fixture()
 def sample_config_file(tmp_path: Path) -> dict:
+    proteomes = tmp_path / "proteomes"
+    proteomes.mkdir()
+    for name in ["Sp1", "Sp2", "Sp3", "Sp4"]:
+        (proteomes / f"{name}.fa").write_text(f">gene1\nMKTLLIL\n")
+
     config = PipelineConfig(
-        project_dir="/share/ceph/project",
+        project_dir=str(tmp_path),
         conda_env="convgeno",
         slurm=SlurmConfig(partition="hawkcpu"),
         orthofinder=OrthoFinderConfig(
-            input_dir="/share/ceph/project/proteomes",
-            output_dir="/share/ceph/project/results",
+            input_dir=str(proteomes),
+            output_dir=str(tmp_path / "results"),
         ),
     )
     config_path = tmp_path / "config.yaml"

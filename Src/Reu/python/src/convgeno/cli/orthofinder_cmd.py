@@ -8,6 +8,7 @@ from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig
 from convgeno.slurm.script_generator import generate_orthofinder_script, write_script
+from convgeno.validation.orthofinder_inputs import validate_orthofinder_inputs
 
 
 def submit_sbatch(script_path: Path) -> str:
@@ -45,6 +46,14 @@ def run_generate(config_path: str, script_path: str) -> Path:
     Returns the script path.
     """
     config = PipelineConfig.load(config_path)
+
+    if config.orthofinder is not None:
+        validation = validate_orthofinder_inputs(config.orthofinder.input_dir)
+        print(validation.summary())
+        if not validation.is_valid():
+            print("Fix the errors above before generating the SLURM script.")
+            sys.exit(1)
+
     content = generate_orthofinder_script(config)
     path = write_script(content, script_path)
     print(f"SLURM script written to: {path}")
