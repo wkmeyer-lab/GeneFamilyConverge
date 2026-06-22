@@ -9,6 +9,8 @@ from typing import Optional
 
 import yaml
 
+from convgeno.external.config import OrthoFinderConfig
+
 
 @dataclass(frozen=True)
 class SlurmConfig:
@@ -85,16 +87,19 @@ class PipelineConfig:
     project_dir: str
     conda_env: str = "convgeno"
     slurm: SlurmConfig = field(default_factory=lambda: SlurmConfig(partition=""))
+    orthofinder: Optional[OrthoFinderConfig] = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        data: dict = {
             "project_dir": self.project_dir,
             "conda_env": self.conda_env,
             "slurm": self.slurm.to_dict(),
         }
+        if self.orthofinder is not None:
+            data["orthofinder"] = self.orthofinder.to_dict()
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -120,8 +125,11 @@ class PipelineConfig:
             raise ValueError("Config file is missing required key 'project_dir'.")
         slurm_dict = data.get("slurm", {})
         slurm_config = SlurmConfig.from_dict(slurm_dict)
+        of_dict = data.get("orthofinder")
+        of_config = OrthoFinderConfig.from_dict(of_dict) if of_dict else None
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
             slurm=slurm_config,
+            orthofinder=of_config,
         )
