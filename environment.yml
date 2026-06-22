@@ -17,13 +17,19 @@ dependencies:
   - python >=3.10,<3.13
   - biopython >=1.80
   - numpy >=1.24
+  - pyyaml>=6.0
+  - orthofinder=2.5.5
+  - diamond=2.1.9
+  - mcl
+  - fasttree
+  - fastme
+  - mafft
 
   # --- testing & linting ---
   - pytest >=7.0
   - pytest-cov
 
   # --- pipeline tools (uncomment as needed) ---
-  # - orthofinder >=2.5
   # - blast >=2.14
   # - hmmer >=3.3
   # - snakemake >=8.0
@@ -31,4 +37,4 @@ dependencies:
   # --- pip-only packages ---
   - pip
   - pip:
-      - -e Src/Reu/python/
+      - -e ./Src/Reu/python/
