@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from convgeno.slurm.config import PipelineConfig, SlurmConfig
+from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
 
 
 class TestSlurmConfigFromDict:
@@ -102,3 +102,44 @@ class TestToDictExcludesNone:
         assert "account" not in d
         assert "mail_user" not in d
         assert "partition" in d
+
+
+class TestOptionalAccountHandling:
+    @pytest.mark.parametrize("account", [None, "", " ", "null", "None", "NULL"])
+    def test_optional_account_values_are_omitted(self, account):
+        cfg = SlurmConfig(partition="hawkcpu", account=account)
+        lines = cfg.to_sbatch_lines()
+        assert not any("--account" in line for line in lines)
+
+    def test_valid_account_is_included(self):
+        cfg = SlurmConfig(partition="hawkcpu", account="valid_alloc")
+        lines = cfg.to_sbatch_lines()
+        assert "#SBATCH --account=valid_alloc" in lines
+
+    @pytest.mark.parametrize("account", [None, "", "null", "None"])
+    def test_from_dict_normalizes_null_variants(self, account):
+        data = {"partition": "hawkcpu"}
+        if account is not None:
+            data["account"] = account
+        cfg = SlurmConfig.from_dict(data)
+        assert cfg.account is None
+
+    def test_from_dict_preserves_valid_account(self):
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu", "account": "wym219"})
+        assert cfg.account == "wym219"
+
+    def test_to_dict_omits_normalized_null_account(self):
+        cfg = SlurmConfig(partition="hawkcpu", account="null")
+        lines = cfg.to_sbatch_lines()
+        assert not any("--account" in line for line in lines)
+
+    def test_save_load_roundtrip_null_account(self, tmp_path):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu", account=None),
+        )
+        path = tmp_path / "config.yaml"
+        config.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.slurm.account is None
+        assert not any("--account" in line for line in loaded.slurm.to_sbatch_lines())

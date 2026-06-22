@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import math
+import re
 import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
-from convgeno.slurm.config import PipelineConfig
+from convgeno.slurm.config import PipelineConfig, normalize_optional_account
+
+
+@dataclass
+class SubmitResult:
+    """Outcome of a single ``submit_sbatch`` call."""
+
+    job_id: str
+    account_stripped: bool = False
 from convgeno.slurm.multinode_generator import (
     generate_prepare_script,
     generate_resume_script,
@@ -48,38 +59,166 @@ def validate_orthofinder_output_dir(output_dir: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def submit_sbatch(script_path: Path, dependency: str | None = None) -> str:
-    """Submit a SLURM batch script via sbatch.
+def is_invalid_account_error(stderr: str) -> bool:
+    """Return ``True`` if *stderr* indicates an invalid SLURM account."""
+    text = stderr.lower()
+    return (
+        "invalid account" in text
+        or "account/partition combination" in text
+    )
 
-    Optionally adds an ``afterok`` dependency on a previously-submitted
-    job ID. Returns the new job ID as a string.
 
-    Raises
-    ------
-    RuntimeError
-        If submission fails or the job ID cannot be parsed from the output.
+_ACCOUNT_RE = re.compile(r"^\s*#SBATCH\s+--account=.*$", re.MULTILINE)
+
+
+def strip_account_directive(script_text: str) -> str:
+    """Return *script_text* with any ``#SBATCH --account=...`` line removed."""
+    return _ACCOUNT_RE.sub("", script_text)
+
+
+def _parse_job_id(stdout: str) -> str:
+    """Extract the numeric job ID from ``sbatch`` stdout.
+
+    Raises ``RuntimeError`` if the ID cannot be parsed.
     """
+    job_id = stdout.strip().split()[-1] if stdout.strip() else ""
+    if not job_id or not job_id.isdigit():
+        raise RuntimeError(
+            f"Could not parse job ID from sbatch output: {stdout.strip()}"
+        )
+    return job_id
+
+
+def _run_sbatch(
+    script_path: Path | str,
+    dependency: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Low-level sbatch invocation — no retry or error interpretation."""
     cmd = ["sbatch"]
     if dependency is not None:
         cmd.append(f"--dependency=afterok:{dependency}")
     cmd.append(str(script_path))
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+
+def _submit_with_stripped_account(
+    path: Path,
+    dependency: str | None,
+) -> SubmitResult:
+    """Submit *path* after removing the ``#SBATCH --account`` line."""
+    original_text = path.read_text(encoding="utf-8")
+    stripped = strip_account_directive(original_text)
+    if stripped != original_text:
+        tmp = Path(tempfile.mktemp(
+            suffix=".sh",
+            dir=path.parent,
+            prefix=f"{path.stem}_noaccount_",
+        ))
+        tmp.write_text(stripped, encoding="utf-8")
+        tmp.chmod(tmp.stat().st_mode | 0o755)
+        result = _run_sbatch(tmp, dependency)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"sbatch submission failed (exit code {result.returncode}):\n"
+                f"{result.stderr.strip()}"
+            )
+        return SubmitResult(job_id=_parse_job_id(result.stdout), account_stripped=True)
+    # No account line to strip — submit as-is.
+    result = _run_sbatch(path, dependency)
     if result.returncode != 0:
         raise RuntimeError(
             f"sbatch submission failed (exit code {result.returncode}):\n"
             f"{result.stderr.strip()}"
         )
-    job_id = result.stdout.strip().split()[-1] if result.stdout.strip() else ""
-    if not job_id or not job_id.isdigit():
-        raise RuntimeError(
-            f"Could not parse job ID from sbatch output: {result.stdout.strip()}"
+    return SubmitResult(job_id=_parse_job_id(result.stdout), account_stripped=False)
+
+
+def submit_sbatch(
+    script_path: Path,
+    dependency: str | None = None,
+    *,
+    strip_account: bool = False,
+) -> SubmitResult:
+    """Submit a SLURM batch script via sbatch with automatic account fallback.
+
+    If the script contains a ``#SBATCH --account=…`` line and SLURM
+    rejects the account, the submission is retried once with the account
+    line stripped.  When *strip_account* is ``True`` the account line is
+    removed up-front (used by multi-node callers after the first
+    fallback succeeded).
+
+    Returns a :class:`SubmitResult` with the job ID and whether the
+    account directive was stripped during fallback.
+    """
+    path = Path(script_path)
+
+    if strip_account:
+        return _submit_with_stripped_account(path, dependency)
+
+    result = _run_sbatch(path, dependency)
+
+    if result.returncode == 0:
+        return SubmitResult(job_id=_parse_job_id(result.stdout))
+
+    script_text = path.read_text(encoding="utf-8")
+    has_account_line = bool(_ACCOUNT_RE.search(script_text))
+
+    # Case A: script has an account line and SLURM rejected it.
+    if is_invalid_account_error(result.stderr) and has_account_line:
+        account_match = _ACCOUNT_RE.search(script_text)
+        account_val = ""
+        if account_match:
+            account_val = account_match.group().split("=", 1)[-1].strip()
+        print(
+            f"WARNING: SLURM rejected account '{account_val}' for this partition.\n"
+            "Retrying submission without --account because some clusters "
+            "do not require account names."
         )
-    return job_id
+        stripped = strip_account_directive(script_text)
+        tmp = Path(tempfile.mktemp(
+            suffix=".sh",
+            dir=path.parent,
+            prefix=f"{path.stem}_noaccount_",
+        ))
+        tmp.write_text(stripped, encoding="utf-8")
+        tmp.chmod(tmp.stat().st_mode | 0o755)
+
+        retry = _run_sbatch(tmp, dependency)
+        if retry.returncode == 0:
+            print(
+                "Submitted successfully without a SLURM account.\n"
+                "To avoid this warning in future runs, set "
+                "slurm.account: null in pipeline_config.yaml."
+            )
+            return SubmitResult(
+                job_id=_parse_job_id(retry.stdout),
+                account_stripped=True,
+            )
+
+        raise RuntimeError(
+            "Job submission failed with and without the configured account.\n"
+            "This cluster may require a valid SLURM allocation account.\n"
+            "Please provide a valid account name in pipeline_config.yaml "
+            "under slurm.account.\n"
+            f"Original account attempted: {account_val}\n"
+            f"Original stderr:\n{result.stderr.strip()}\n"
+            f"Retry stderr:\n{retry.stderr.strip()}"
+        )
+
+    # Case B: no account line but SLURM hints one is required.
+    if not has_account_line and "account" in result.stderr.lower():
+        raise RuntimeError(
+            "This cluster appears to require a SLURM allocation account.\n"
+            "Set a valid account in pipeline_config.yaml:\n\n"
+            "slurm:\n"
+            "  account: <your_valid_allocation>\n\n"
+            f"sbatch stderr:\n{result.stderr.strip()}"
+        )
+
+    raise RuntimeError(
+        f"sbatch submission failed (exit code {result.returncode}):\n"
+        f"{result.stderr.strip()}"
+    )
 
 
 def run_generate(config_path: str, script_path: str) -> Path:
@@ -126,7 +265,7 @@ def run_submit(
             return
 
     try:
-        job_id = submit_sbatch(path)
+        sr = submit_sbatch(path)
     except FileNotFoundError:
         print("ERROR: sbatch command not found. Are you on a SLURM login node?")
         sys.exit(1)
@@ -138,10 +277,10 @@ def run_submit(
         sys.exit(1)
 
     print("Job submitted successfully.")
-    print(f"  Job ID:  {job_id}")
+    print(f"  Job ID:  {sr.job_id}")
     print(f"  Script:  {path}")
-    print(f"  Monitor: squeue -j {job_id}")
-    print(f"  Cancel:  scancel {job_id}")
+    print(f"  Monitor: squeue -j {sr.job_id}")
+    print(f"  Cancel:  scancel {sr.job_id}")
 
 
 def run_generate_multinode(config_path: str, script_dir: str) -> dict:
@@ -227,12 +366,28 @@ def run_submit_multinode(
             return
 
     try:
-        job_a_id = submit_sbatch(paths["prepare"])
-        print(f"Job A (prepare) submitted: {job_a_id}")
-        job_b_id = submit_sbatch(paths["search"], dependency=job_a_id)
-        print(f"Job B (search array) submitted: {job_b_id}")
-        job_c_id = submit_sbatch(paths["resume"], dependency=job_b_id)
-        print(f"Job C (resume) submitted: {job_c_id}")
+        # If the first submission triggers an invalid-account fallback and
+        # succeeds without an account, submit the remaining scripts without
+        # the account line as well so the dependency chain is consistent.
+        sr_a = submit_sbatch(paths["prepare"])
+        strip_rest = sr_a.account_stripped
+        print(f"Job A (prepare) submitted: {sr_a.job_id}")
+
+        sr_b = submit_sbatch(
+            paths["search"],
+            dependency=sr_a.job_id,
+            strip_account=strip_rest,
+        )
+        if sr_b.account_stripped:
+            strip_rest = True
+        print(f"Job B (search array) submitted: {sr_b.job_id}")
+
+        sr_c = submit_sbatch(
+            paths["resume"],
+            dependency=sr_b.job_id,
+            strip_account=strip_rest,
+        )
+        print(f"Job C (resume) submitted: {sr_c.job_id}")
     except FileNotFoundError:
         print("ERROR: sbatch command not found. Are you on a SLURM login node?")
         sys.exit(1)
@@ -245,9 +400,9 @@ def run_submit_multinode(
 
     print("")
     print("Multi-node OrthoFinder job chain submitted:")
-    print(f"  Job A (prepare):      {job_a_id}")
-    print(f"  Job B (search array): {job_b_id} (depends on {job_a_id})")
-    print(f"  Job C (resume):       {job_c_id} (depends on {job_b_id})")
+    print(f"  Job A (prepare):      {sr_a.job_id}")
+    print(f"  Job B (search array): {sr_b.job_id} (depends on {sr_a.job_id})")
+    print(f"  Job C (resume):       {sr_c.job_id} (depends on {sr_b.job_id})")
     print("")
     print("Monitor all: squeue -u $USER")
-    print(f"Cancel all:  scancel {job_a_id} {job_b_id} {job_c_id}")
+    print(f"Cancel all:  scancel {sr_a.job_id} {sr_b.job_id} {sr_c.job_id}")

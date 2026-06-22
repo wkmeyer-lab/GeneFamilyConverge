@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from convgeno.slurm.config import PipelineConfig, SlurmConfig
+from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
 from convgeno.slurm.discovery import discover_partitions
 
 
@@ -116,7 +116,9 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
 
     mem_per_cpu = _prompt("Memory per CPU", default="4G")
     mail_user = _prompt_optional("Email for SLURM job notifications")
-    account = _prompt_optional("SLURM account/allocation name")
+    account = normalize_optional_account(
+        _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
+    )
 
     slurm = SlurmConfig(
         partition=partition_name,
@@ -144,5 +146,4 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  Memory per CPU:     {mem_per_cpu}")
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
-    if account is not None:
-        print(f"  Account:            {account}")
+    print(f"  SLURM account:      {account if account is not None else 'omitted'}")

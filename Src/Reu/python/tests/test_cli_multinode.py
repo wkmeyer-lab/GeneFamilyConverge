@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from convgeno.cli.orthofinder_cmd import (
+    SubmitResult,
     run_generate_multinode,
     run_submit_multinode,
 )
@@ -76,7 +77,11 @@ class TestRunSubmitMultinode:
     )
     @patch(
         "convgeno.cli.orthofinder_cmd.submit_sbatch",
-        side_effect=["111", "222", "333"],
+        side_effect=[
+            SubmitResult(job_id="111"),
+            SubmitResult(job_id="222"),
+            SubmitResult(job_id="333"),
+        ],
     )
     def test_chains_dependencies(
         self, mock_sbatch, _mock_validate, sample_config_file

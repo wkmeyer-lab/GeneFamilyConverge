@@ -473,3 +473,60 @@ class TestCrossCutting:
             )
         with pytest.raises(ValueError, match="OrthoFinder"):
             generate_resume_script(config)
+
+
+class TestAccountOmissionInMultinodeScripts:
+    @pytest.fixture()
+    def no_account_config(self) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                time_limit="48:00:00",
+                account=None,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/proteomes",
+                output_dir="/share/ceph/project/results",
+                search_threads=16,
+                analysis_threads=8,
+            ),
+        )
+
+    def test_multinode_scripts_omit_null_account(self, no_account_config):
+        prepare = generate_prepare_script(no_account_config)
+        search = _search_script(no_account_config)
+        resume = generate_resume_script(no_account_config)
+        for script in (prepare, search, resume):
+            assert "--account" not in script
+
+    def test_multinode_scripts_include_valid_account(self, sample_config):
+        # sample_config has account="wym219"
+        prepare = generate_prepare_script(sample_config)
+        search = _search_script(sample_config)
+        resume = generate_resume_script(sample_config)
+        for script in (prepare, search, resume):
+            assert "#SBATCH --account=wym219" in script
+
+    @pytest.mark.parametrize("account", ["", "null", "None", "NULL"])
+    def test_multinode_scripts_omit_stringy_null_accounts(
+        self, account, no_account_config
+    ):
+        config = PipelineConfig(
+            project_dir=no_account_config.project_dir,
+            conda_env=no_account_config.conda_env,
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                time_limit="48:00:00",
+                account=account,
+            ),
+            orthofinder=no_account_config.orthofinder,
+        )
+        prepare = generate_prepare_script(config)
+        search = _search_script(config)
+        resume = generate_resume_script(config)
+        for script in (prepare, search, resume):
+            assert "--account" not in script

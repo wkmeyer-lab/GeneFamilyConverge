@@ -12,6 +12,21 @@ import yaml
 from convgeno.external.config import OrthoFinderConfig
 
 
+def normalize_optional_account(account: str | None) -> str | None:
+    """Normalize an optional SLURM account value.
+
+    Returns ``None`` for blank, ``"null"``, ``"None"``, or actual
+    ``None`` inputs so that no ``#SBATCH --account`` line is emitted.
+    A real non-empty string is returned as-is.
+    """
+    if account is None:
+        return None
+    value = str(account).strip()
+    if value == "" or value.lower() in {"null", "none"}:
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class SlurmConfig:
     """SLURM resource configuration for a single job submission."""
@@ -53,10 +68,18 @@ class SlurmConfig:
         valid_fields = {f.name for f in dataclasses.fields(cls)}
         extra_sbatch_args = data.pop("extra_sbatch_args", [])
         filtered = {k: v for k, v in data.items() if k in valid_fields}
+        if "account" in filtered:
+            filtered["account"] = normalize_optional_account(filtered["account"])
         return cls(extra_sbatch_args=extra_sbatch_args, **filtered)
 
     def to_sbatch_lines(self) -> list[str]:
-        """Generate ``#SBATCH`` directive lines for an sbatch script header."""
+        """Generate ``#SBATCH`` directive lines for an sbatch script header.
+
+        The account value is normalized through
+        :func:`normalize_optional_account` so that ``"null"``, ``"None"``,
+        and blank strings are treated identically to ``None`` — no
+        ``--account`` line is emitted.
+        """
         flag_map = {
             "partition": "--partition",
             "time_limit": "--time",
@@ -64,7 +87,6 @@ class SlurmConfig:
             "ntasks": "--ntasks",
             "cpus_per_task": "--cpus-per-task",
             "mem_per_cpu": "--mem-per-cpu",
-            "account": "--account",
             "mail_user": "--mail-user",
             "mail_type": "--mail-type",
             "output_pattern": "--output",
@@ -75,6 +97,11 @@ class SlurmConfig:
             value = getattr(self, attr)
             if value is not None:
                 lines.append(f"#SBATCH {flag}={value}")
+
+        account = normalize_optional_account(self.account)
+        if account is not None:
+            lines.append(f"#SBATCH --account={account}")
+
         for arg in self.extra_sbatch_args:
             lines.append(f"#SBATCH {arg}")
         return lines

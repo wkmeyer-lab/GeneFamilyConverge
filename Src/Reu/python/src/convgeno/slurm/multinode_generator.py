@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from convgeno.slurm.config import PipelineConfig
+from convgeno.slurm.config import PipelineConfig, normalize_optional_account
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
 #
@@ -59,8 +59,9 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
         "--output": config.slurm.output_pattern,
         "--error": config.slurm.error_pattern,
     }
-    if config.slurm.account is not None:
-        lines["--account"] = config.slurm.account
+    account = normalize_optional_account(config.slurm.account)
+    if account is not None:
+        lines["--account"] = account
     if config.slurm.mail_user is not None:
         lines["--mail-user"] = config.slurm.mail_user
         lines["--mail-type"] = config.slurm.mail_type
