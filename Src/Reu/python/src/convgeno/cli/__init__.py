@@ -54,6 +54,22 @@ def main() -> None:
             "(default: slurm_scripts/orthofinder.sh)"
         ),
     )
+    of_gen.add_argument(
+        "--multinode",
+        action="store_true",
+        help=(
+            "Generate three scripts for multi-node execution "
+            "(prepare, search array, resume) instead of one."
+        ),
+    )
+    of_gen.add_argument(
+        "--script-dir",
+        default="slurm_scripts",
+        help=(
+            "Directory to write generated scripts (used with --multinode, "
+            "default: slurm_scripts)"
+        ),
+    )
 
     of_run = of_subparsers.add_parser(
         "run",
@@ -77,6 +93,22 @@ def main() -> None:
         action="store_true",
         help="Skip confirmation prompt and submit immediately.",
     )
+    of_run.add_argument(
+        "--multinode",
+        action="store_true",
+        help=(
+            "Generate and submit three scripts for multi-node execution "
+            "(prepare, search array, resume) instead of one."
+        ),
+    )
+    of_run.add_argument(
+        "--script-dir",
+        default="slurm_scripts",
+        help=(
+            "Directory to write generated scripts (used with --multinode, "
+            "default: slurm_scripts)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -90,15 +122,33 @@ def main() -> None:
         run_init(output_path=args.output)
 
     elif args.command == "orthofinder":
-        from convgeno.cli.orthofinder_cmd import run_generate, run_submit
-
         if args.orthofinder_command == "generate":
-            run_generate(config_path=args.config, script_path=args.script)
+            if args.multinode:
+                from convgeno.cli.orthofinder_cmd import run_generate_multinode
+
+                run_generate_multinode(
+                    config_path=args.config, script_dir=args.script_dir
+                )
+            else:
+                from convgeno.cli.orthofinder_cmd import run_generate
+
+                run_generate(config_path=args.config, script_path=args.script)
         elif args.orthofinder_command == "run":
-            run_submit(
-                config_path=args.config,
-                script_path=args.script,
-                skip_confirm=args.yes,
-            )
+            if args.multinode:
+                from convgeno.cli.orthofinder_cmd import run_submit_multinode
+
+                run_submit_multinode(
+                    config_path=args.config,
+                    script_dir=args.script_dir,
+                    skip_confirm=args.yes,
+                )
+            else:
+                from convgeno.cli.orthofinder_cmd import run_submit
+
+                run_submit(
+                    config_path=args.config,
+                    script_path=args.script,
+                    skip_confirm=args.yes,
+                )
         else:
             of_parser.print_help()
