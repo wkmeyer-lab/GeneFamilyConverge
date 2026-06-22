@@ -17,6 +17,32 @@ from datetime import datetime
 
 from convgeno.slurm.config import PipelineConfig
 
+# POSIX ERE alternation matching a real OrthoFinder search command.
+#
+# Requirements baked in:
+#   * The program name must be followed by a flag token (starting with
+#     "-"). OrthoFinder's prose header lines like "diamond commands that
+#     must be run" or "blastp commands that must be run" do NOT start
+#     with a flag, so this filter rejects them. The previous loose
+#     pattern ``^(diamond|blastp|makeblastdb)`` matched those headers
+#     and the search array crashed trying to ``eval`` them.
+#   * For ``diamond`` we additionally require the subcommand keyword
+#     (``blastp`` or ``makedb``).
+_COMMAND_START_ALT = (
+    r"diamond[[:space:]]+(blastp|makedb)[[:space:]]+-"
+    r"|blastp[[:space:]]+-"
+    r"|makeblastdb[[:space:]]+-"
+)
+
+# Validation regex: matches a *cleaned* command line in $COMMANDS_FILE
+# (leading whitespace already stripped by sed).
+COMMAND_LINE_REGEX = f"^({_COMMAND_START_ALT})"
+
+# Extraction regex: matches a raw log line, which OrthoFinder sometimes
+# indents. Leading whitespace is stripped by the sed stage of the
+# extraction pipeline before the line is written to $COMMANDS_FILE.
+COMMAND_LINE_REGEX_EXTRACT = f"^[[:space:]]*({_COMMAND_START_ALT})"
+
 
 def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
     """Build SBATCH header lines from ``config.slurm`` with field overrides.
@@ -135,18 +161,38 @@ if [ $PREPARE_EXIT -ne 0 ]; then
     exit $PREPARE_EXIT
 fi
 
-# Extract search commands from OrthoFinder stdout. Diamond commands
-# start with "diamond"; BLAST commands start with "blastp" or "makeblastdb".
-grep -E "^(diamond|blastp|makeblastdb)" "$PREPARE_LOG" > "$COMMANDS_FILE" || true
+# Extract search commands from OrthoFinder stdout. The regex requires a
+# subcommand keyword (blastp/makedb) followed by a flag token (-...), so
+# prose header lines like "diamond commands that must be run" are
+# excluded. Leading whitespace is then stripped because OrthoFinder
+# sometimes indents commands.
+grep -E '{COMMAND_LINE_REGEX_EXTRACT}' "$PREPARE_LOG" \\
+    | sed 's/^[[:space:]]*//' \\
+    > "$COMMANDS_FILE" || true
 
-NUM_COMMANDS=$(wc -l < "$COMMANDS_FILE")
-echo "Extracted $NUM_COMMANDS search commands to $COMMANDS_FILE"
-
-if [ "$NUM_COMMANDS" -eq 0 ]; then
-    echo "ERROR: No search commands were extracted."
+# Validation: bail out *now* if the command file is empty or contains a
+# line that the search-array job cannot safely `eval`. The previous bug
+# (a header line in the file) escaped detection because the file was
+# non-empty and counted line-by-line — search task 0 then tried to run
+# `diamond commands that must be run` and crashed DIAMOND.
+if [ ! -s "$COMMANDS_FILE" ]; then
+    echo "ERROR: No valid DIAMOND/search commands were extracted."
     echo "Check prepare log: $PREPARE_LOG"
     exit 1
 fi
+
+BAD_LINES=$(grep -nEv '{COMMAND_LINE_REGEX}' "$COMMANDS_FILE" || true)
+
+if [ -n "$BAD_LINES" ]; then
+    echo "ERROR: Invalid lines found in command file:"
+    echo "$BAD_LINES"
+    echo "Command file: $COMMANDS_FILE"
+    echo "Prepare log: $PREPARE_LOG"
+    exit 1
+fi
+
+NUM_COMMANDS=$(wc -l < "$COMMANDS_FILE")
+echo "Extracted $NUM_COMMANDS search commands to $COMMANDS_FILE"
 
 # Locate the WorkingDirectory OrthoFinder created and persist its path
 # for the resume script.

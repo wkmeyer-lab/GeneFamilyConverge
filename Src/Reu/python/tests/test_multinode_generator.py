@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import textwrap
 
 import pytest
 
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
+    COMMAND_LINE_REGEX,
+    COMMAND_LINE_REGEX_EXTRACT,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
@@ -113,6 +116,195 @@ class TestPrepareScript:
         script = generate_prepare_script(sample_config)
         assert 'SEARCH_PROGRAM="diamond"' in script
         assert '-op -S "$SEARCH_PROGRAM"' in script
+
+    def test_uses_strict_command_extraction_regex(self, sample_config):
+        # The previous loose grep matched any line starting with "diamond"
+        # — including the prose header "diamond commands that must be run"
+        # — which broke the search array. The new regex must require a
+        # subcommand token after "diamond".
+        script = generate_prepare_script(sample_config)
+        assert 'grep -E "^(diamond|blastp|makeblastdb)"' not in script
+        assert "diamond[[:space:]]+(blastp|makedb)" in script
+        assert "makeblastdb[[:space:]]" in script
+
+    def test_validates_command_file_after_extraction(self, sample_config):
+        # The prepare script must fail loudly if the command file is empty
+        # or contains a non-command line, so the search array job never
+        # receives garbage to `eval`.
+        script = generate_prepare_script(sample_config)
+        assert 'if [ ! -s "$COMMANDS_FILE" ]' in script
+        assert "No valid DIAMOND/search commands were extracted" in script
+        assert "BAD_LINES=" in script
+        assert "Invalid lines found in command file" in script
+
+    def test_strips_leading_whitespace_from_commands(self, sample_config):
+        # OrthoFinder sometimes indents command lines. We strip leading
+        # whitespace so the search loop can `eval` them directly.
+        script = generate_prepare_script(sample_config)
+        assert "sed 's/^[[:space:]]*//'" in script
+
+
+class TestCommandExtractionRegex:
+    """End-to-end test that actually runs the prepare-script regex against
+    synthetic OrthoFinder output. String-matching the script source can't
+    catch regex bugs; running `grep` with the real pattern can."""
+
+    SAMPLE_LOG = textwrap.dedent(
+        """\
+        OrthoFinder version 2.5.5
+        ...analysing files...
+
+        diamond commands that must be run
+        diamond blastp --ignore-warnings -d db -q query.fa -o out.txt --more-sensitive
+        diamond blastp --ignore-warnings -d db2 -q query2.fa -o out2.txt --more-sensitive
+        diamond makedb --in species.fa -d diamondDBSpecies1
+        makeblastdb -in species.fa -dbtype prot
+            diamond blastp --ignore-warnings -d db3 -q query3.fa -o out3.txt
+        some random text
+        blastp commands that must be run
+        Done!
+        """
+    )
+
+    @pytest.mark.skipif(
+        shutil.which("bash") is None or shutil.which("grep") is None,
+        reason="bash and grep are required for extraction test",
+    )
+    def test_extraction_includes_real_commands_excludes_header(self, tmp_path):
+        log = tmp_path / "prepare.log"
+        log.write_text(self.SAMPLE_LOG)
+        out = tmp_path / "commands.txt"
+
+        # Use the exact extraction pipeline the prepare script uses.
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"grep -E '{COMMAND_LINE_REGEX_EXTRACT}' \"$1\" "
+                "| sed 's/^[[:space:]]*//' > \"$2\" || true",
+                "_",
+                str(log),
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+        lines = out.read_text().splitlines()
+
+        # The OrthoFinder header lines must NOT appear. These are the
+        # regressions — both the diamond and blastp variants of the
+        # "X commands that must be run" prose.
+        assert "diamond commands that must be run" not in lines
+        assert "blastp commands that must be run" not in lines
+
+        # Real commands must appear, with leading whitespace stripped.
+        assert (
+            "diamond blastp --ignore-warnings -d db -q query.fa -o out.txt "
+            "--more-sensitive"
+        ) in lines
+        assert (
+            "diamond blastp --ignore-warnings -d db2 -q query2.fa -o out2.txt "
+            "--more-sensitive"
+        ) in lines
+        assert "diamond makedb --in species.fa -d diamondDBSpecies1" in lines
+        assert "makeblastdb -in species.fa -dbtype prot" in lines
+        # Indented line is captured and de-indented.
+        assert (
+            "diamond blastp --ignore-warnings -d db3 -q query3.fa -o out3.txt"
+            in lines
+        )
+        # Prose and unrelated text are dropped.
+        assert "some random text" not in lines
+
+    @pytest.mark.parametrize(
+        "bad_line",
+        [
+            "diamond commands that must be run",
+            "blastp commands that must be run",
+            "some random prose",
+            "",
+        ],
+    )
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash is required to exercise the generated prepare script",
+    )
+    def test_prepare_script_validation_rejects_bad_line(
+        self, sample_config, tmp_path, bad_line
+    ):
+        # Build a $COMMANDS_FILE containing the bad line that broke the
+        # cluster (and a few siblings), then run the BAD_LINES validation
+        # block the prepare script uses. It must exit non-zero.
+        bad_commands = tmp_path / "diamond_commands.txt"
+        bad_commands.write_text(bad_line + "\n")
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""
+                set -uo pipefail
+                COMMANDS_FILE="$1"
+                BAD_LINES=$(grep -nEv '{COMMAND_LINE_REGEX}' "$COMMANDS_FILE" || true)
+                if [ -n "$BAD_LINES" ]; then
+                    echo "REJECTED"
+                    exit 2
+                fi
+                echo "ACCEPTED"
+                """,
+                "_",
+                str(bad_commands),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2, (
+            f"Expected validation to reject {bad_line!r}. "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "REJECTED" in result.stdout
+
+    @pytest.mark.skipif(
+        shutil.which("bash") is None,
+        reason="bash is required to exercise the generated prepare script",
+    )
+    def test_prepare_script_validation_accepts_real_commands(
+        self, sample_config, tmp_path
+    ):
+        good_commands = tmp_path / "diamond_commands.txt"
+        good_commands.write_text(
+            "diamond blastp --ignore-warnings -d db -q q.fa -o o.txt\n"
+            "diamond makedb --in s.fa -d dbS1\n"
+            "makeblastdb -in s.fa -dbtype prot\n"
+        )
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""
+                set -uo pipefail
+                COMMANDS_FILE="$1"
+                BAD_LINES=$(grep -nEv '{COMMAND_LINE_REGEX}' "$COMMANDS_FILE" || true)
+                if [ -n "$BAD_LINES" ]; then
+                    echo "REJECTED: $BAD_LINES"
+                    exit 2
+                fi
+                echo "ACCEPTED"
+                """,
+                "_",
+                str(good_commands),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"Expected validation to accept real commands. "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "ACCEPTED" in result.stdout
 
 
 def _search_script(config, **kwargs):
