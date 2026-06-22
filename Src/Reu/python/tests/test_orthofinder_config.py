@@ -55,6 +55,36 @@ class TestToCommandArgs:
         assert args[args.index("-a") + 1] == "8"
         assert args[args.index("-S") + 1] == "diamond"
 
+    def test_msa_method_emits_dash_M_msa_not_program_name(self):
+        # OrthoFinder's -M takes the method ("msa" or "dendroblast"), not
+        # a program name. The program is selected with -A.
+        cfg = OrthoFinderConfig(input_dir="/in", output_dir="/out")
+        args = cfg.to_command_args()
+        assert args[args.index("-M") + 1] == "msa"
+        assert args[args.index("-A") + 1] == "mafft"
+        assert args[args.index("-T") + 1] == "fasttree"
+
+    def test_custom_msa_and_tree_program(self):
+        cfg = OrthoFinderConfig(
+            input_dir="/in",
+            output_dir="/out",
+            msa_program="muscle",
+            tree_program="iqtree",
+        )
+        args = cfg.to_command_args()
+        assert args[args.index("-M") + 1] == "msa"
+        assert args[args.index("-A") + 1] == "muscle"
+        assert args[args.index("-T") + 1] == "iqtree"
+
+    def test_empty_msa_program_uses_default_dendroblast(self):
+        # When msa_program is empty, fall back to OrthoFinder's default
+        # DendroBLAST gene-tree method and omit -M, -A, -T entirely.
+        cfg = OrthoFinderConfig(input_dir="/in", output_dir="/out", msa_program="")
+        args = cfg.to_command_args()
+        assert "-M" not in args
+        assert "-A" not in args
+        assert "-T" not in args
+
     def test_with_extra_args(self):
         cfg = OrthoFinderConfig(
             input_dir="/in", output_dir="/out", extra_args=["--fewer-files"]

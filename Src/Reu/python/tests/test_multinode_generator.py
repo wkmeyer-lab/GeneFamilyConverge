@@ -64,6 +64,18 @@ class TestPrepareScript:
     def test_includes_account(self, sample_config):
         assert "--account=wym219" in generate_prepare_script(sample_config)
 
+    def test_does_not_create_output_dir_directly(self, sample_config):
+        # OrthoFinder refuses to run with an existing -o directory.
+        # Only the parent should be created.
+        script = generate_prepare_script(sample_config)
+        assert 'mkdir -p "$(dirname "$OUTPUT_DIR")"' in script
+        assert 'mkdir -p "$OUTPUT_DIR"' not in script
+
+    def test_fails_loudly_if_output_dir_exists(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert 'if [ -e "$OUTPUT_DIR" ]' in script
+        assert "already exists" in script
+
 
 class TestSearchArrayScript:
     def test_is_array_job(self, sample_config):

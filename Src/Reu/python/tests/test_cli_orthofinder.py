@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from convgeno.cli.orthofinder_cmd import run_generate, run_submit, submit_sbatch
+from convgeno.cli.orthofinder_cmd import (
+    run_generate,
+    run_submit,
+    submit_sbatch,
+    validate_orthofinder_output_dir,
+)
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig
 
@@ -133,4 +138,65 @@ class TestRunSubmit:
                 config_path=f["config_path"],
                 script_path=str(f["tmp_path"] / "job.sh"),
                 skip_confirm=True,
+            )
+
+
+class TestValidateOrthofinderOutputDir:
+    def test_rejects_existing_dir(self, tmp_path: Path):
+        existing = tmp_path / "already_there"
+        existing.mkdir()
+        with pytest.raises(ValueError, match="already exists"):
+            validate_orthofinder_output_dir(str(existing))
+
+    def test_rejects_existing_file(self, tmp_path: Path):
+        existing = tmp_path / "a_file"
+        existing.write_text("x")
+        with pytest.raises(ValueError, match="already exists"):
+            validate_orthofinder_output_dir(str(existing))
+
+    def test_rejects_single_quote_characters(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="quote characters"):
+            validate_orthofinder_output_dir(f"'{tmp_path}/out'")
+
+    def test_rejects_double_quote_characters(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="quote characters"):
+            validate_orthofinder_output_dir(f'"{tmp_path}/out"')
+
+    def test_accepts_nonexistent_dir(self, tmp_path: Path):
+        fresh = tmp_path / "fresh_run"
+        validate_orthofinder_output_dir(str(fresh))
+        assert not fresh.exists()
+
+    def test_creates_parent_directory(self, tmp_path: Path):
+        nested = tmp_path / "parent" / "child" / "run"
+        validate_orthofinder_output_dir(str(nested))
+        assert nested.parent.is_dir()
+        assert not nested.exists()
+
+
+class TestRunGenerateOutputDirValidation:
+    def test_fails_if_output_dir_already_exists(self, tmp_path: Path):
+        # Build a config where output_dir already exists on disk.
+        proteomes = tmp_path / "proteomes"
+        proteomes.mkdir()
+        for name in ["Sp1", "Sp2", "Sp3", "Sp4"]:
+            (proteomes / f"{name}.fa").write_text(">g\nMK\n")
+        existing_output = tmp_path / "already_exists"
+        existing_output.mkdir()
+
+        config = PipelineConfig(
+            project_dir=str(tmp_path),
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(
+                input_dir=str(proteomes),
+                output_dir=str(existing_output),
+            ),
+        )
+        config_path = tmp_path / "config.yaml"
+        config.save(config_path)
+
+        with pytest.raises(SystemExit):
+            run_generate(
+                config_path=str(config_path),
+                script_path=str(tmp_path / "job.sh"),
             )

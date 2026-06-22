@@ -54,11 +54,36 @@ class TestGenerateOrthoFinderScript:
         assert "-t 16" in script
         assert "-a 8" in script
         assert "-S diamond" in script
+        # OrthoFinder's -M takes a method, not a program name.
+        assert "-M msa" in script
+        assert "-A mafft" in script
+        assert "-T fasttree" in script
+        assert "-M mafft" not in script
 
     def test_contains_input_validation(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
         assert 'if [ ! -d "$INPUT_DIR" ]' in script
         assert "FASTA_COUNT" in script
+
+    def test_does_not_create_output_dir_directly(self, sample_config: PipelineConfig):
+        # OrthoFinder refuses to run with an existing -o output directory.
+        # The script must create only the PARENT directory.
+        script = generate_orthofinder_script(sample_config)
+        assert 'mkdir -p "$(dirname "$OUTPUT_DIR")"' in script
+        assert 'mkdir -p "$OUTPUT_DIR"' not in script
+
+    def test_fails_loudly_if_output_dir_exists(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+        assert 'if [ -e "$OUTPUT_DIR" ]' in script
+        assert "already exists" in script
+
+    def test_uses_help_for_version_probe_not_unsupported_flag(
+        self, sample_config: PipelineConfig
+    ):
+        # OrthoFinder 2.5.5 does not support --version. Use -h instead.
+        script = generate_orthofinder_script(sample_config)
+        assert "orthofinder --version" not in script
+        assert "orthofinder -h" in script
 
     def test_contains_exit_code_check(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)

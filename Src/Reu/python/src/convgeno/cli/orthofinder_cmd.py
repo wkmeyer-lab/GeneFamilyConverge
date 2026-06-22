@@ -16,6 +16,37 @@ from convgeno.slurm.script_generator import generate_orthofinder_script, write_s
 from convgeno.validation.orthofinder_inputs import validate_orthofinder_inputs
 
 
+def validate_orthofinder_output_dir(output_dir: str) -> None:
+    """Validate that ``output_dir`` is suitable for a fresh OrthoFinder run.
+
+    OrthoFinder refuses to run when the non-default ``-o`` output
+    directory already exists. We also reject paths containing literal
+    quote characters, which usually indicate a malformed config value.
+    The parent directory is created if missing.
+
+    Raises
+    ------
+    ValueError
+        If ``output_dir`` contains quote characters, or if the directory
+        itself already exists.
+    """
+    if "'" in output_dir or '"' in output_dir:
+        raise ValueError(
+            f"Invalid output_dir {output_dir!r}: path must not contain "
+            "quote characters."
+        )
+
+    path = Path(output_dir)
+    if path.exists():
+        raise ValueError(
+            f"OrthoFinder output_dir already exists: {path}\n"
+            "Choose a fresh output_dir. OrthoFinder refuses to use an "
+            "existing non-default output directory."
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def submit_sbatch(script_path: Path, dependency: str | None = None) -> str:
     """Submit a SLURM batch script via sbatch.
 
@@ -62,6 +93,12 @@ def run_generate(config_path: str, script_path: str) -> Path:
         print(validation.summary())
         if not validation.is_valid():
             print("Fix the errors above before generating the SLURM script.")
+            sys.exit(1)
+
+        try:
+            validate_orthofinder_output_dir(config.orthofinder.output_dir)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
             sys.exit(1)
 
     content = generate_orthofinder_script(config)
@@ -119,6 +156,12 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
         print(validation.summary())
         if not validation.is_valid():
             print("Fix the errors above before generating the SLURM scripts.")
+            sys.exit(1)
+
+        try:
+            validate_orthofinder_output_dir(config.orthofinder.output_dir)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
             sys.exit(1)
 
     prepare_content = generate_prepare_script(config)

@@ -45,15 +45,28 @@ class OrthoFinderConfig:
         return cls(extra_args=extra_args, **filtered)
 
     def to_command_args(self) -> list[str]:
-        """Build the command-line argument list for the ``orthofinder`` command."""
+        """Build the command-line argument list for the ``orthofinder`` command.
+
+        Notes
+        -----
+        OrthoFinder's ``-M`` flag takes a *method* name (``msa`` or
+        ``dendroblast``), not a program name. The MSA program is selected
+        with ``-A`` and the tree program with ``-T``. When ``msa_program``
+        is truthy we emit ``-M msa -A <msa_program>`` (plus ``-T`` if a
+        tree program is set). When ``msa_program`` is empty we fall back
+        to OrthoFinder's default DendroBLAST gene-tree method and omit
+        ``-M``, ``-A``, and ``-T`` entirely.
+        """
         args = [
             "-f", self.input_dir,
             "-o", self.output_dir,
             "-t", str(self.search_threads),
             "-a", str(self.analysis_threads),
             "-S", self.sequence_search,
-            "-M", self.msa_program,
-            "-T", self.tree_program,
         ]
+        if self.msa_program:
+            args.extend(["-M", "msa", "-A", self.msa_program])
+            if self.tree_program:
+                args.extend(["-T", self.tree_program])
         args.extend(self.extra_args)
         return args

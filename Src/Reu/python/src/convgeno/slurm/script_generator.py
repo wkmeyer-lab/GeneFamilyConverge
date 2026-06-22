@@ -74,7 +74,8 @@ if ! command -v orthofinder &> /dev/null; then
     exit 1
 fi
 
-echo "OrthoFinder version: $(orthofinder --version 2>&1 || echo 'unknown')"
+echo "OrthoFinder version:"
+orthofinder -h 2>&1 | head -n 2 || true
 echo "Using conda env: {config.conda_env}"
 echo ""
 
@@ -100,8 +101,16 @@ echo "FASTA files found: $FASTA_COUNT"
 echo "Output directory: $OUTPUT_DIR"
 echo ""
 
-# Create output directory if it does not exist
-mkdir -p "$OUTPUT_DIR"
+# OrthoFinder refuses to run when the non-default -o output directory
+# already exists. Create only the PARENT directory, and fail loudly if
+# the target output directory itself is present.
+mkdir -p "$(dirname "$OUTPUT_DIR")"
+
+if [ -e "$OUTPUT_DIR" ]; then
+    echo "ERROR: OrthoFinder output directory already exists: $OUTPUT_DIR"
+    echo "Choose a fresh output_dir in pipeline_config.yaml."
+    exit 1
+fi
 
 # ------------------------------------------------------------
 # Run OrthoFinder

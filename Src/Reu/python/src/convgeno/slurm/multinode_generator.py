@@ -103,7 +103,16 @@ INPUT_DIR="{config.orthofinder.input_dir}"
 OUTPUT_DIR="{config.orthofinder.output_dir}"
 COMMANDS_FILE="$OUTPUT_DIR/diamond_commands.txt"
 
-mkdir -p "$OUTPUT_DIR"
+# OrthoFinder refuses to run when the non-default -o output directory
+# already exists. Create only the PARENT directory, and fail loudly if
+# the target output directory itself is present.
+mkdir -p "$(dirname "$OUTPUT_DIR")"
+
+if [ -e "$OUTPUT_DIR" ]; then
+    echo "ERROR: OrthoFinder output directory already exists: $OUTPUT_DIR"
+    echo "Choose a fresh output_dir in pipeline_config.yaml."
+    exit 1
+fi
 
 # Run OrthoFinder prepare phase. -op stops after writing the search
 # commands and exits without running them.
