@@ -17,6 +17,7 @@ from convgeno.slurm.config import PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX,
     COMMAND_LINE_REGEX_EXTRACT,
+    choose_analysis_threads,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
@@ -393,10 +394,11 @@ class TestResumeScript:
     def test_uses_b_flag(self, sample_config):
         assert "-b " in generate_resume_script(sample_config)
 
-    def test_uses_threads(self, sample_config):
+    def test_uses_threads_from_config(self, sample_config):
+        # sample_config has search_threads=16, analysis_threads=8
         script = generate_resume_script(sample_config)
-        assert "-t 16" in script
-        assert "-a 8" in script
+        assert "TOTAL_THREADS=16" in script
+        assert "ANALYSIS_THREADS=8" in script
 
     def test_does_not_pass_search_program(self, sample_config):
         # The resume command line should not contain "-S diamond" — search
@@ -530,3 +532,138 @@ class TestAccountOmissionInMultinodeScripts:
         resume = generate_resume_script(config)
         for script in (prepare, search, resume):
             assert "--account" not in script
+
+
+class TestChooseAnalysisThreads:
+    def test_none_limit_returns_conservative(self):
+        assert choose_analysis_threads(16, None) == 2
+
+    def test_low_limit_returns_1(self):
+        assert choose_analysis_threads(16, 2048) == 1
+
+    def test_medium_limit_returns_2(self):
+        assert choose_analysis_threads(16, 4096) == 2
+
+    def test_high_limit_returns_4(self):
+        assert choose_analysis_threads(16, 8192) == 4
+
+    def test_very_high_limit_returns_8(self):
+        assert choose_analysis_threads(16, 16384) == 8
+
+    def test_capped_by_cpus(self):
+        assert choose_analysis_threads(2, 65536) == 2
+
+    def test_single_cpu(self):
+        assert choose_analysis_threads(1, 65536) == 1
+
+
+class TestResumeScriptUlimitAndTmpdir:
+    @pytest.fixture()
+    def config_with_limit(self) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                time_limit="48:00:00",
+                open_file_limit=8192,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/proteomes",
+                output_dir="/share/ceph/project/results",
+                search_threads=16,
+                analysis_threads=None,
+            ),
+        )
+
+    @pytest.fixture()
+    def config_no_limit(self) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                time_limit="48:00:00",
+                open_file_limit=None,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/proteomes",
+                output_dir="/share/ceph/project/results",
+                search_threads=16,
+                analysis_threads=None,
+            ),
+        )
+
+    def test_resume_contains_ulimit_n(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert "ulimit -n" in script
+
+    def test_ulimit_wrapped_in_if_not_bare(self, config_with_limit):
+        # The ulimit call must be safe under set -e. It should be
+        # inside an if block so a refusal doesn't abort the script.
+        script = generate_resume_script(config_with_limit)
+        assert 'if ulimit -n "$REQUESTED_OPEN_FILE_LIMIT"' in script
+
+    def test_ulimit_fallback_warning(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert "Could not raise open-file limit" in script
+
+    def test_no_limit_prints_current(self, config_no_limit):
+        script = generate_resume_script(config_no_limit)
+        assert "Open-file limit (current):" in script
+        assert "REQUESTED_OPEN_FILE_LIMIT" not in script
+
+    def test_resume_sets_tmpdir(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert 'export TMPDIR="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+        assert 'mkdir -p "$TMPDIR"' in script
+
+    def test_resume_cleans_tmpdir_on_success(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert 'rm -rf "$TMPDIR"' in script
+        assert "Cleaning up TMPDIR" in script
+
+    def test_resume_preserves_tmpdir_on_failure(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert "Preserving TMPDIR for debugging" in script
+
+    def test_auto_analysis_threads_with_limit_8192(self, config_with_limit):
+        # open_file_limit=8192, analysis_threads=None → auto = 4
+        script = generate_resume_script(config_with_limit)
+        assert "ANALYSIS_THREADS=4" in script
+        assert "-a 8" not in script
+
+    def test_auto_analysis_threads_without_limit(self, config_no_limit):
+        # open_file_limit=None, analysis_threads=None → auto = 2
+        script = generate_resume_script(config_no_limit)
+        assert "ANALYSIS_THREADS=2" in script
+
+    def test_explicit_analysis_threads_override(self):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                open_file_limit=8192,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/in",
+                output_dir="/out",
+                search_threads=16,
+                analysis_threads=6,
+            ),
+        )
+        script = generate_resume_script(config)
+        assert "ANALYSIS_THREADS=6" in script
+
+    def test_resume_uses_variable_not_hardcoded(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert '-a "$ANALYSIS_THREADS"' in script
+        assert '-t "$TOTAL_THREADS"' in script
+
+    def test_resume_exits_with_of_exit(self, config_with_limit):
+        script = generate_resume_script(config_with_limit)
+        assert 'exit "$OF_EXIT"' in script

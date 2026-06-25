@@ -42,6 +42,7 @@ class SlurmConfig:
     mail_type: str = "END,FAIL"
     output_pattern: str = "logs/%x_%j.out"
     error_pattern: str = "logs/%x_%j.err"
+    open_file_limit: Optional[int] = None
     extra_sbatch_args: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

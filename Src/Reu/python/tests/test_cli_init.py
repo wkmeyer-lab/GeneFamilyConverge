@@ -46,6 +46,7 @@ class TestInitCreatesConfig:
             "4G",           # memory per cpu
             "",             # mail user (skip)
             "",             # account (skip)
+            "",             # open_file_limit (default 8192)
         ])
 
         with (
@@ -72,6 +73,7 @@ class TestInitCreatesConfig:
             "8G",                  # memory
             "user@example.com",    # mail
             "myaccount",           # account
+            "",                    # open_file_limit (default 8192)
         ])
 
         with (
@@ -112,6 +114,7 @@ class TestInitOverwriteBehaviour:
             "2G",         # mem
             "",           # mail (skip)
             "",           # account (skip)
+            "",           # open_file_limit (default 8192)
         ])
 
         with (
@@ -143,6 +146,7 @@ class TestInitWarnings:
             "4G",           # mem
             "",             # mail
             "",             # account
+            "",             # open_file_limit (default 8192)
         ])
 
         output = tmp_path / "config.yaml"

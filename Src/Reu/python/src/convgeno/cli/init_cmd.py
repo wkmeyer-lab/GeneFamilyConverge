@@ -46,6 +46,26 @@ def _prompt_int(message: str, default: int) -> int:
     return value
 
 
+def _prompt_optional_int(message: str, default: int | None = None) -> int | None:
+    """Prompt for an optional integer value.
+
+    Returns *default* if the user presses Enter, ``None`` if they type
+    nothing and *default* is ``None``.
+    """
+    if default is not None:
+        prompt_str = f"{message} [{default}]: "
+    else:
+        prompt_str = f"{message} (press Enter to skip): "
+    raw = input(prompt_str).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print("  Please enter a valid integer.")
+        return _prompt_optional_int(message, default)
+
+
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
     """Run the interactive init wizard to create pipeline_config.yaml."""
     path = Path(output_path)
@@ -119,6 +139,18 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     account = normalize_optional_account(
         _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
     )
+    open_file_limit = _prompt_optional_int(
+        "Maximum open files per job [optional, default 8192; press Enter to use default]",
+        default=8192,
+    )
+    print(
+        "  Lower analysis threads reduce open-file/shared-memory pressure "
+        "during large OrthoFinder resume jobs."
+    )
+    print(
+        "  Set orthofinder.analysis_threads in the config to override the "
+        "auto-selected value."
+    )
 
     slurm = SlurmConfig(
         partition=partition_name,
@@ -127,6 +159,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         mem_per_cpu=mem_per_cpu,
         mail_user=mail_user,
         account=account,
+        open_file_limit=open_file_limit,
     )
     config = PipelineConfig(
         project_dir=project_dir,
@@ -147,3 +180,4 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
+    print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")

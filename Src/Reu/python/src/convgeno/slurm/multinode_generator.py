@@ -74,6 +74,27 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
     return "\n".join(formatted)
 
 
+def choose_analysis_threads(cpus_per_task: int, open_file_limit: int | None) -> int:
+    """Pick a conservative ``-a`` value for the OrthoFinder resume phase.
+
+    Called only when ``orthofinder.analysis_threads`` is ``None`` (auto).
+    Higher analysis-thread counts open more shared-memory segments and
+    temp files; on clusters with tight ``ulimit -n`` this causes
+    ``OSError: [Errno 24] Too many open files``.
+    """
+    cpu_cap = max(1, cpus_per_task)
+
+    if open_file_limit is None:
+        return min(2, cpu_cap)
+    if open_file_limit < 4096:
+        return 1
+    if open_file_limit < 8192:
+        return min(2, cpu_cap)
+    if open_file_limit < 16384:
+        return min(4, cpu_cap)
+    return min(8, cpu_cap)
+
+
 def _validate_has_orthofinder(config: PipelineConfig) -> None:
     if config.orthofinder is None:
         raise ValueError(
@@ -379,6 +400,16 @@ def generate_resume_script(config: PipelineConfig) -> str:
     Runs on a single node after all search array tasks complete. Resumes
     OrthoFinder from pre-computed search results, performing clustering,
     MSA, and tree inference.
+
+    The generated script:
+
+    * Attempts to raise the open-file limit via ``ulimit -n`` (wrapped
+      in ``if`` so ``set -e`` does not abort if the kernel refuses).
+    * Sets ``TMPDIR`` to a project-local temp directory to avoid filling
+      ``/dev/shm`` or ``/tmp``.
+    * Cleans up ``$TMPDIR`` on success, preserves it on failure.
+    * Uses either the user-specified ``analysis_threads`` or a value
+      derived from :func:`choose_analysis_threads`.
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None
@@ -395,11 +426,37 @@ def generate_resume_script(config: PipelineConfig) -> str:
         },
     )
 
-    # The resume command only needs -b, -t, and -a. The search/MSA/tree
-    # programs were configured during the prepare phase and OrthoFinder
-    # reads them from WorkingDirectory metadata.
+    # Resolve analysis threads: explicit value or heuristic.
+    if config.orthofinder.analysis_threads is not None:
+        analysis_threads = config.orthofinder.analysis_threads
+    else:
+        analysis_threads = choose_analysis_threads(
+            config.slurm.cpus_per_task,
+            config.slurm.open_file_limit,
+        )
+
     extra = " ".join(config.orthofinder.extra_args)
     extra_suffix = f" {extra}" if extra else ""
+
+    # Build the ulimit block.  If no limit is configured, just print
+    # the current value; otherwise try to raise it.
+    open_file_limit = config.slurm.open_file_limit
+    if open_file_limit is not None:
+        ulimit_block = f"""\
+REQUESTED_OPEN_FILE_LIMIT="{open_file_limit}"
+
+echo "Open-file limit before adjustment: $(ulimit -n || echo unknown)"
+
+if ulimit -n "$REQUESTED_OPEN_FILE_LIMIT" 2>/dev/null; then
+    echo "Open-file limit raised to: $(ulimit -n)"
+else
+    echo "WARNING: Could not raise open-file limit to $REQUESTED_OPEN_FILE_LIMIT."
+    echo "Continuing with current open-file limit: $(ulimit -n || echo unknown)"
+fi"""
+    else:
+        ulimit_block = """\
+echo "Open-file limit (current): $(ulimit -n || echo unknown)"
+"""
 
     script = f"""\
 #!/bin/bash
@@ -424,6 +481,9 @@ START_SECONDS=$SECONDS
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate {config.conda_env}
 
+# ---- Open-file limit ----
+{ulimit_block}
+
 OUTPUT_DIR="{config.orthofinder.output_dir}"
 OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
 RUN_NAME="$(basename "$OUTPUT_DIR")"
@@ -445,12 +505,22 @@ if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
     exit 1
 fi
 
+# ---- Project-local TMPDIR ----
+export TMPDIR="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
+mkdir -p "$TMPDIR"
+echo "TMPDIR=$TMPDIR"
+
+TOTAL_THREADS={config.orthofinder.search_threads}
+ANALYSIS_THREADS={analysis_threads}
+
 echo "Resuming OrthoFinder from: $WORK_DIR"
+echo "Search threads (-t): $TOTAL_THREADS"
+echo "Analysis threads (-a): $ANALYSIS_THREADS"
 echo ""
 
-orthofinder -b "$WORK_DIR" -t {config.orthofinder.search_threads} -a {config.orthofinder.analysis_threads}{extra_suffix}
+orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS"{extra_suffix}
 
-EXIT_CODE=$?
+OF_EXIT=$?
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -460,22 +530,25 @@ SECS=$(( ELAPSED % 60 ))
 echo ""
 echo "============================================================"
 echo "convgeno: resume phase finished"
-echo "Exit code: $EXIT_CODE"
+echo "Exit code: $OF_EXIT"
 echo "End:       $(date)"
 echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
 echo "============================================================"
 
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "ERROR: OrthoFinder resume phase exited with code $EXIT_CODE"
-    exit $EXIT_CODE
+if [ "$OF_EXIT" -eq 0 ]; then
+    echo "OrthoFinder completed successfully. Cleaning up TMPDIR: $TMPDIR"
+    rm -rf "$TMPDIR"
+
+    if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
+        echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
+        echo "Check $OUTPUT_DIR for a Results_* directory."
+    fi
+
+    echo "OrthoFinder multi-node run completed successfully."
+else
+    echo "OrthoFinder exited with code $OF_EXIT. Preserving TMPDIR for debugging: $TMPDIR"
 fi
 
-if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
-    echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
-    echo "Check $OUTPUT_DIR for a Results_* directory."
-fi
-
-echo "OrthoFinder multi-node run completed successfully."
-exit 0
+exit "$OF_EXIT"
 """
     return script

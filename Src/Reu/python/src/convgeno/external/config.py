@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -13,7 +14,7 @@ class OrthoFinderConfig:
     input_dir: str
     output_dir: str
     search_threads: int = 16
-    analysis_threads: int = 8
+    analysis_threads: Optional[int] = 8
     sequence_search: str = "diamond"
     msa_program: str = "mafft"
     tree_program: str = "fasttree"
@@ -57,11 +58,12 @@ class OrthoFinderConfig:
         to OrthoFinder's default DendroBLAST gene-tree method and omit
         ``-M``, ``-A``, and ``-T`` entirely.
         """
+        effective_analysis = self.analysis_threads if self.analysis_threads is not None else 1
         args = [
             "-f", self.input_dir,
             "-o", self.output_dir,
             "-t", str(self.search_threads),
-            "-a", str(self.analysis_threads),
+            "-a", str(effective_analysis),
             "-S", self.sequence_search,
         ]
         if self.msa_program:

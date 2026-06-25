@@ -143,3 +143,39 @@ class TestOptionalAccountHandling:
         loaded = PipelineConfig.load(path)
         assert loaded.slurm.account is None
         assert not any("--account" in line for line in loaded.slurm.to_sbatch_lines())
+
+
+class TestOpenFileLimitConfig:
+    def test_default_is_none(self):
+        cfg = SlurmConfig(partition="hawkcpu")
+        assert cfg.open_file_limit is None
+
+    def test_from_dict_with_open_file_limit(self):
+        cfg = SlurmConfig.from_dict(
+            {"partition": "hawkcpu", "open_file_limit": 8192}
+        )
+        assert cfg.open_file_limit == 8192
+
+    def test_from_dict_without_open_file_limit(self):
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu"})
+        assert cfg.open_file_limit is None
+
+    def test_roundtrip_with_open_file_limit(self, tmp_path):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu", open_file_limit=16384),
+        )
+        path = tmp_path / "config.yaml"
+        config.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.slurm.open_file_limit == 16384
+
+    def test_roundtrip_null_open_file_limit(self, tmp_path):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu", open_file_limit=None),
+        )
+        path = tmp_path / "config.yaml"
+        config.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.slurm.open_file_limit is None
