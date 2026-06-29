@@ -39,6 +39,15 @@ class TestDeriveOrthoFinderThreads:
         assert search_threads == 48
         assert analysis_threads == 12
 
+    def test_threads_from_hyperthreaded_detection(self):
+        # Hyperthreading is handled upstream by detect_node_cpus:
+        # 104 logical CPUs with ThreadsPerCore=2 gives 52 physical cores,
+        # then reserves 4 cores, so init passes recommended_physical=48.
+        search_threads, analysis_threads = _derive_orthofinder_threads(48)
+
+        assert search_threads == 48
+        assert analysis_threads == 12
+
     def test_threads_from_32_cpus(self):
         search_threads, analysis_threads = _derive_orthofinder_threads(32)
 
