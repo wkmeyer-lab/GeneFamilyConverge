@@ -260,13 +260,13 @@ class TestAccountHelpers:
             "#!/bin/bash\n"
             "#SBATCH --partition=hawkcpu\n"
             "#SBATCH --account=prm526\n"
-            "#SBATCH --time=48:00:00\n"
+            "#SBATCH --time=72:00:00\n"
             "echo hi\n"
         )
         stripped = strip_account_directive(script)
         assert "--account" not in stripped
         assert "#SBATCH --partition=hawkcpu" in stripped
-        assert "#SBATCH --time=48:00:00" in stripped
+        assert "#SBATCH --time=72:00:00" in stripped
 
     def test_strip_account_directive_noop_when_absent(self):
         script = "#!/bin/bash\n#SBATCH --partition=hawkcpu\necho hi\n"

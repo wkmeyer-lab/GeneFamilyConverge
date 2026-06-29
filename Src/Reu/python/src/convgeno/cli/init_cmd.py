@@ -132,7 +132,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             f"CPUs per node."
         )
 
-    time_limit = _prompt("Job time limit (HH:MM:SS or D-HH:MM:SS)", default="48:00:00")
+    time_limit = _prompt("Job time limit (HH:MM:SS or D-HH:MM:SS)", default="72:00:00")
     if ":" not in time_limit:
         print(
             "  Warning: time limit format may be invalid. "

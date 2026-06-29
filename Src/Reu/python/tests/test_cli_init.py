@@ -42,11 +42,12 @@ class TestInitCreatesConfig:
             "convgeno",     # conda env
             "1",            # select partition (hawkcpu)
             "16",           # cpus per task
-            "48:00:00",     # time limit
+            "72:00:00",     # time limit
             "4G",           # memory per cpu
             "",             # mail user (skip)
             "",             # account (skip)
             "",             # open_file_limit (default 8192)
+            "",             # accept detected runtime defaults, if present
         ])
 
         with (
@@ -74,6 +75,7 @@ class TestInitCreatesConfig:
             "user@example.com",    # mail
             "myaccount",           # account
             "",                    # open_file_limit (default 8192)
+            "",                    # accept detected runtime defaults, if present
         ])
 
         with (
@@ -115,6 +117,7 @@ class TestInitOverwriteBehaviour:
             "",           # mail (skip)
             "",           # account (skip)
             "",           # open_file_limit (default 8192)
+            "",           # accept detected runtime defaults, if present
         ])
 
         with (
@@ -142,11 +145,12 @@ class TestInitWarnings:
             "convgeno",     # env
             "1",            # select partition
             "32",           # cpus (exceeds 8)
-            "48:00:00",     # time
+            "72:00:00",     # time
             "4G",           # mem
             "",             # mail
             "",             # account
             "",             # open_file_limit (default 8192)
+            "",             # accept detected runtime defaults, if present
         ])
 
         output = tmp_path / "config.yaml"

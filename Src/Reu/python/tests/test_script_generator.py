@@ -32,7 +32,7 @@ def sample_config(sample_runtime) -> PipelineConfig:
         project_dir="/share/ceph/project",
         conda_env="convgeno",
         slurm=SlurmConfig(
-            partition="hawkcpu", cpus_per_task=16, time_limit="48:00:00"
+            partition="hawkcpu", cpus_per_task=16, time_limit="72:00:00"
         ),
         orthofinder=OrthoFinderConfig(
             input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
@@ -50,7 +50,7 @@ class TestGenerateOrthoFinderScript:
     def test_contains_sbatch_directives(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
         assert "#SBATCH --partition=hawkcpu" in script
-        assert "#SBATCH --time=48:00:00" in script
+        assert "#SBATCH --time=72:00:00" in script
         assert "#SBATCH --cpus-per-task=16" in script
         assert "#SBATCH --job-name=convgeno_orthofinder" in script
 

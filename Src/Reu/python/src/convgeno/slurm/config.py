@@ -37,7 +37,7 @@ class SlurmConfig:
     """SLURM resource configuration for a single job submission."""
 
     partition: str
-    time_limit: str = "48:00:00"
+    time_limit: str = "72:00:00"
     nodes: int = 1
     ntasks: int = 1
     cpus_per_task: int = 16

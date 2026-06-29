@@ -43,7 +43,7 @@ def sample_config(sample_runtime) -> PipelineConfig:
         slurm=SlurmConfig(
             partition="hawkcpu",
             cpus_per_task=16,
-            time_limit="48:00:00",
+            time_limit="72:00:00",
             account="wym219",
         ),
         orthofinder=OrthoFinderConfig(
@@ -514,7 +514,7 @@ class TestAccountOmissionInMultinodeScripts:
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=16,
-                time_limit="48:00:00",
+                time_limit="72:00:00",
                 account=None,
             ),
             orthofinder=OrthoFinderConfig(
@@ -551,7 +551,7 @@ class TestAccountOmissionInMultinodeScripts:
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=16,
-                time_limit="48:00:00",
+                time_limit="72:00:00",
                 account=account,
             ),
             orthofinder=no_account_config.orthofinder,
@@ -596,7 +596,7 @@ class TestResumeScriptUlimitAndTmpdir:
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=16,
-                time_limit="48:00:00",
+                time_limit="72:00:00",
                 open_file_limit=8192,
             ),
             orthofinder=OrthoFinderConfig(
@@ -616,7 +616,7 @@ class TestResumeScriptUlimitAndTmpdir:
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=16,
-                time_limit="48:00:00",
+                time_limit="72:00:00",
                 open_file_limit=None,
             ),
             orthofinder=OrthoFinderConfig(

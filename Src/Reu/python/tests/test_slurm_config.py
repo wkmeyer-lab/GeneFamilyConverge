@@ -46,7 +46,7 @@ class TestToSbatchLines:
         lines = cfg.to_sbatch_lines()
         assert isinstance(lines, list)
         assert "#SBATCH --partition=hawkcpu" in lines
-        assert "#SBATCH --time=48:00:00" in lines
+        assert "#SBATCH --time=72:00:00" in lines
         assert "#SBATCH --cpus-per-task=16" in lines
         assert "#SBATCH --nodes=1" in lines
         assert not any("--account" in line for line in lines)
@@ -87,7 +87,7 @@ class TestPipelineConfigRoundtrip:
         assert loaded.conda_env == original.conda_env
         assert loaded.slurm.partition == "hawkcpu"
         assert loaded.slurm.cpus_per_task == 32
-        assert loaded.slurm.time_limit == "48:00:00"
+        assert loaded.slurm.time_limit == "72:00:00"
         assert loaded.slurm.nodes == 1
 
     def test_load_missing_file(self):
