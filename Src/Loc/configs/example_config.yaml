@@ -23,10 +23,25 @@ isoform_filter:
   # Strategy for picking one protein per gene.
   strategy: longest
 
+# OrthoFinder settings for gene family clustering
+# These are set when running `convgeno orthofinder` commands
 orthofinder:
-  enabled: true
-  threads: 8
-  extra_args: ""
+  # Path to directory containing filtered proteome FASTA files
+  input_dir: "/share/ceph/wym219group/shared/projects/GeneFamilyConverge/Data/interim/cleaned_proteomes"
+  # Path where OrthoFinder writes its results
+  output_dir: "/share/ceph/wym219group/shared/projects/GeneFamilyConverge/Data/processed/orthofinder"
+  # Threads for DIAMOND/BLAST sequence search (-t flag)
+  search_threads: 16
+  # Threads for analysis steps like tree inference (-a flag)
+  analysis_threads: 8
+  # Sequence search program: "diamond" (fast, default) or "blast"
+  sequence_search: "diamond"
+  # Multiple sequence alignment: "mafft" (default) or "muscle"
+  msa_program: "mafft"
+  # Tree inference: "fasttree" (default), "raxml", "raxml-ng", "iqtree"
+  tree_program: "fasttree"
+  # Additional OrthoFinder flags (e.g., ["--fewer-files"] for large datasets)
+  extra_args: []
 
 cafe:
   enabled: true

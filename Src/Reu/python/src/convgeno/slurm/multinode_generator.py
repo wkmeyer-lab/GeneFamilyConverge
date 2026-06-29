@@ -1,0 +1,583 @@
+"""SLURM script generation for multi-node OrthoFinder execution.
+
+The multi-node mode splits OrthoFinder into three chained jobs:
+
+1. **Prepare** — runs ``orthofinder -op`` on a single node to format inputs
+   and emit the list of DIAMOND/BLAST search commands.
+2. **Search array** — a SLURM array job that distributes those search
+   commands across multiple nodes.
+3. **Resume** — runs ``orthofinder -b <workdir>`` on a single node once
+   all search commands are done, performing clustering, MSA, and tree
+   inference.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from convgeno.slurm.config import PipelineConfig, normalize_optional_account
+from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
+
+# POSIX ERE alternation matching a real OrthoFinder search command.
+#
+# Requirements baked in:
+#   * The program name must be followed by a flag token (starting with
+#     "-"). OrthoFinder's prose header lines like "diamond commands that
+#     must be run" or "blastp commands that must be run" do NOT start
+#     with a flag, so this filter rejects them. The previous loose
+#     pattern ``^(diamond|blastp|makeblastdb)`` matched those headers
+#     and the search array crashed trying to ``eval`` them.
+#   * For ``diamond`` we additionally require the subcommand keyword
+#     (``blastp`` or ``makedb``).
+_COMMAND_START_ALT = (
+    r"diamond[[:space:]]+(blastp|makedb)[[:space:]]+-"
+    r"|blastp[[:space:]]+-"
+    r"|makeblastdb[[:space:]]+-"
+)
+
+# Validation regex: matches a *cleaned* command line in $COMMANDS_FILE
+# (leading whitespace already stripped by sed).
+COMMAND_LINE_REGEX = f"^({_COMMAND_START_ALT})"
+
+# Extraction regex: matches a raw log line, which OrthoFinder sometimes
+# indents. Leading whitespace is stripped by the sed stage of the
+# extraction pipeline before the line is written to $COMMANDS_FILE.
+COMMAND_LINE_REGEX_EXTRACT = f"^[[:space:]]*({_COMMAND_START_ALT})"
+
+
+def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
+    """Build SBATCH header lines from ``config.slurm`` with field overrides.
+
+    Returns the lines joined into a single ``\\n``-separated string.
+    """
+    lines: dict[str, str] = {
+        "--partition": config.slurm.partition,
+        "--nodes": str(config.slurm.nodes),
+        "--ntasks": str(config.slurm.ntasks),
+        "--cpus-per-task": str(config.slurm.cpus_per_task),
+        "--time": config.slurm.time_limit,
+        "--mem-per-cpu": config.slurm.mem_per_cpu,
+        "--output": config.slurm.output_pattern,
+        "--error": config.slurm.error_pattern,
+        "--export": "ALL",
+    }
+    account = normalize_optional_account(config.slurm.account)
+    if account is not None:
+        lines["--account"] = account
+    if config.slurm.mail_user is not None:
+        lines["--mail-user"] = config.slurm.mail_user
+        lines["--mail-type"] = config.slurm.mail_type
+
+    lines.update(overrides)
+
+    formatted = [f"#SBATCH {flag}={value}" for flag, value in lines.items()]
+    for arg in config.slurm.extra_sbatch_args:
+        formatted.append(f"#SBATCH {arg}")
+    return "\n".join(formatted)
+
+
+def choose_analysis_threads(cpus_per_task: int, open_file_limit: int | None) -> int:
+    """Pick a conservative ``-a`` value for the OrthoFinder resume phase.
+
+    Called only when ``orthofinder.analysis_threads`` is ``None`` (auto).
+    Higher analysis-thread counts open more shared-memory segments and
+    temp files; on clusters with tight ``ulimit -n`` this causes
+    ``OSError: [Errno 24] Too many open files``.
+    """
+    cpu_cap = max(1, cpus_per_task)
+
+    if open_file_limit is None:
+        return min(2, cpu_cap)
+    if open_file_limit < 4096:
+        return 1
+    if open_file_limit < 8192:
+        return min(2, cpu_cap)
+    if open_file_limit < 16384:
+        return min(4, cpu_cap)
+    return min(8, cpu_cap)
+
+
+def _validate_has_orthofinder(config: PipelineConfig) -> None:
+    if config.orthofinder is None:
+        raise ValueError(
+            "OrthoFinder settings not found in pipeline config. "
+            "Add an 'orthofinder' section to pipeline_config.yaml."
+        )
+
+
+def _resolve_runtime(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None,
+) -> CondaRuntimeConfig:
+    """Resolve runtime from explicit parameter or config, raising if absent."""
+    resolved = runtime if runtime is not None else config.runtime
+    if resolved is None:
+        raise ValueError(
+            "No runtime configuration provided. "
+            "Run 'convgeno init' to detect and store conda paths."
+        )
+    return resolved
+
+
+def generate_prepare_script(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
+    """Generate SLURM script for OrthoFinder's prepare phase (``-op``).
+
+    Runs on a single node. Captures the DIAMOND/BLAST commands to a file
+    for the array job.
+    """
+    _validate_has_orthofinder(config)
+    assert config.orthofinder is not None  # for type checker
+    resolved_runtime = _resolve_runtime(config, runtime)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = _build_sbatch_header(
+        config,
+        overrides={
+            "--job-name": "convgeno_of_prepare",
+            "--nodes": "1",
+            "--ntasks": "1",
+            "--cpus-per-task": "4",
+            "--time": "02:00:00",
+        },
+    )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
+
+    script = f"""\
+#!/bin/bash
+# ============================================================
+# OrthoFinder prepare phase (-op) — multi-node mode
+# Generated by convgeno on {timestamp}
+# ============================================================
+
+{header}
+
+set -euo pipefail
+
+{bootstrap_block}
+
+echo "============================================================"
+echo "convgeno: OrthoFinder prepare phase started"
+echo "Job ID:    $SLURM_JOB_ID"
+echo "Node:      $HOSTNAME"
+echo "Start:     $(date)"
+echo "============================================================"
+
+START_SECONDS=$SECONDS
+
+INPUT_DIR="{config.orthofinder.input_dir}"
+OUTPUT_DIR="{config.orthofinder.output_dir}"
+SEARCH_PROGRAM="{config.orthofinder.sequence_search}"
+
+# All auxiliary files (log, commands list, WorkingDirectory pointer)
+# live in the PARENT directory, not in $OUTPUT_DIR itself. OrthoFinder
+# refuses to run if its -o output directory already exists, so we must
+# not pre-create $OUTPUT_DIR and must not redirect any output into it
+# before OrthoFinder has created it.
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+
+mkdir -p "$OUTPUT_PARENT"
+
+if [ -e "$OUTPUT_DIR" ]; then
+    echo "ERROR: OrthoFinder output directory already exists: $OUTPUT_DIR"
+    echo "Choose a fresh output_dir in the config."
+    exit 1
+fi
+
+PREPARE_LOG="$OUTPUT_PARENT/${{RUN_NAME}}_prepare_full_stdout.log"
+COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
+WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
+
+# Run OrthoFinder prepare phase. -op stops after writing the search
+# commands and exits without running them. stdout is redirected to a
+# log file in $OUTPUT_PARENT (which already exists), NOT in $OUTPUT_DIR.
+orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op -S "$SEARCH_PROGRAM" > "$PREPARE_LOG" 2>&1
+
+PREPARE_EXIT=$?
+if [ $PREPARE_EXIT -ne 0 ]; then
+    echo "ERROR: OrthoFinder prepare phase failed with exit code $PREPARE_EXIT"
+    cat "$PREPARE_LOG"
+    exit $PREPARE_EXIT
+fi
+
+# Extract search commands from OrthoFinder stdout. The regex requires a
+# subcommand keyword (blastp/makedb) followed by a flag token (-...), so
+# prose header lines like "diamond commands that must be run" are
+# excluded. Leading whitespace is then stripped because OrthoFinder
+# sometimes indents commands.
+grep -E '{COMMAND_LINE_REGEX_EXTRACT}' "$PREPARE_LOG" \\
+    | sed 's/^[[:space:]]*//' \\
+    > "$COMMANDS_FILE" || true
+
+# Validation: bail out *now* if the command file is empty or contains a
+# line that the search-array job cannot safely `eval`. The previous bug
+# (a header line in the file) escaped detection because the file was
+# non-empty and counted line-by-line — search task 0 then tried to run
+# `diamond commands that must be run` and crashed DIAMOND.
+if [ ! -s "$COMMANDS_FILE" ]; then
+    echo "ERROR: No valid DIAMOND/search commands were extracted."
+    echo "Check prepare log: $PREPARE_LOG"
+    exit 1
+fi
+
+BAD_LINES=$(grep -nEv '{COMMAND_LINE_REGEX}' "$COMMANDS_FILE" || true)
+
+if [ -n "$BAD_LINES" ]; then
+    echo "ERROR: Invalid lines found in command file:"
+    echo "$BAD_LINES"
+    echo "Command file: $COMMANDS_FILE"
+    echo "Prepare log: $PREPARE_LOG"
+    exit 1
+fi
+
+NUM_COMMANDS=$(wc -l < "$COMMANDS_FILE")
+echo "Extracted $NUM_COMMANDS search commands to $COMMANDS_FILE"
+
+# Locate the WorkingDirectory OrthoFinder created and persist its path
+# for the resume script.
+WORK_DIR=$(find "$OUTPUT_DIR" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
+
+if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+    echo "ERROR: Could not find OrthoFinder WorkingDirectory under $OUTPUT_DIR"
+    echo "Check prepare log: $PREPARE_LOG"
+    exit 1
+fi
+
+echo "$WORK_DIR" > "$WORK_DIR_FILE"
+
+ELAPSED=$(( SECONDS - START_SECONDS ))
+HOURS=$(( ELAPSED / 3600 ))
+MINUTES=$(( (ELAPSED % 3600) / 60 ))
+SECS=$(( ELAPSED % 60 ))
+
+echo ""
+echo "============================================================"
+echo "convgeno: prepare phase finished"
+echo "End:       $(date)"
+echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
+echo "============================================================"
+exit 0
+"""
+    return script
+
+
+def generate_search_array_script(
+    config: PipelineConfig,
+    commands_per_task: int = 50,
+    array_max: int | None = None,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
+    """Generate SLURM array job that executes DIAMOND/BLAST search commands.
+
+    Each array task runs ``commands_per_task`` commands from the file
+    produced by the prepare phase. The array upper bound (``array_max``)
+    must be computed by the caller from the actual input size — hard-
+    coding a large value (e.g. ``0-9999``) is rejected by many SLURM
+    clusters with ``Invalid job array specification``.
+
+    Parameters
+    ----------
+    config:
+        The pipeline configuration. Must include an ``orthofinder``
+        section.
+    commands_per_task:
+        How many DIAMOND/BLAST commands each array task executes.
+        Must be > 0.
+    array_max:
+        Inclusive upper bound for the SLURM array (the script will have
+        ``#SBATCH --array=0-<array_max>``). Required; must be a
+        non-negative integer. The CLI computes this from the number of
+        input FASTA files so the array size is deterministic and tied
+        to validation.
+    runtime:
+        Conda runtime configuration. Falls back to ``config.runtime``
+        if ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``config.orthofinder`` is missing, ``commands_per_task`` is
+        not positive, or ``array_max`` is ``None`` or negative.
+    """
+    _validate_has_orthofinder(config)
+    assert config.orthofinder is not None
+    resolved_runtime = _resolve_runtime(config, runtime)
+
+    if commands_per_task <= 0:
+        raise ValueError("commands_per_task must be positive")
+    if array_max is None or array_max < 0:
+        raise ValueError("array_max must be a non-negative integer")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = _build_sbatch_header(
+        config,
+        overrides={
+            "--job-name": "convgeno_of_search",
+            "--nodes": "1",
+            "--ntasks": "1",
+            "--cpus-per-task": str(config.orthofinder.search_threads),
+            "--time": config.slurm.time_limit,
+            "--output": config.slurm.output_pattern.replace("%j", "%A_%a"),
+            "--error": config.slurm.error_pattern.replace("%j", "%A_%a"),
+            "--array": f"0-{array_max}",
+        },
+    )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
+
+    script = f"""\
+#!/bin/bash
+# ============================================================
+# OrthoFinder search phase — SLURM array job (multi-node mode)
+# Generated by convgeno on {timestamp}
+# ============================================================
+
+{header}
+
+set -euo pipefail
+
+{bootstrap_block}
+
+echo "============================================================"
+echo "convgeno: OrthoFinder search array task $SLURM_ARRAY_TASK_ID"
+echo "Job ID:    $SLURM_JOB_ID (array job $SLURM_ARRAY_JOB_ID)"
+echo "Node:      $HOSTNAME"
+echo "Start:     $(date)"
+echo "============================================================"
+
+START_SECONDS=$SECONDS
+
+OUTPUT_DIR="{config.orthofinder.output_dir}"
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
+COMMANDS_PER_TASK={commands_per_task}
+
+if [ ! -f "$COMMANDS_FILE" ]; then
+    echo "ERROR: Commands file not found: $COMMANDS_FILE"
+    echo "The prepare job may have failed. Check its logs."
+    exit 1
+fi
+
+TOTAL_COMMANDS=$(wc -l < "$COMMANDS_FILE")
+
+START_LINE=$(( SLURM_ARRAY_TASK_ID * COMMANDS_PER_TASK + 1 ))
+END_LINE=$(( START_LINE + COMMANDS_PER_TASK - 1 ))
+
+# If this task's start line is beyond the total, this array slot has
+# no work. Exit cleanly so the dependency chain can continue.
+if [ "$START_LINE" -gt "$TOTAL_COMMANDS" ]; then
+    echo "Task $SLURM_ARRAY_TASK_ID: no commands to run (start=$START_LINE > total=$TOTAL_COMMANDS). Exiting."
+    exit 0
+fi
+
+if [ "$END_LINE" -gt "$TOTAL_COMMANDS" ]; then
+    END_LINE=$TOTAL_COMMANDS
+fi
+
+echo "Total commands: $TOTAL_COMMANDS"
+echo "This task runs commands $START_LINE to $END_LINE ($COMMANDS_PER_TASK per task)"
+echo ""
+
+FAILED=0
+for LINE_NUM in $(seq $START_LINE $END_LINE); do
+    CMD=$(sed -n "${{LINE_NUM}}p" "$COMMANDS_FILE")
+    if [ -z "$CMD" ]; then
+        continue
+    fi
+    echo "[Task $SLURM_ARRAY_TASK_ID] Running command $LINE_NUM: $CMD"
+    eval "$CMD"
+    CMD_EXIT=$?
+    if [ $CMD_EXIT -ne 0 ]; then
+        echo "WARNING: Command $LINE_NUM failed with exit code $CMD_EXIT"
+        FAILED=$((FAILED + 1))
+    fi
+done
+
+ELAPSED=$(( SECONDS - START_SECONDS ))
+HOURS=$(( ELAPSED / 3600 ))
+MINUTES=$(( (ELAPSED % 3600) / 60 ))
+SECS=$(( ELAPSED % 60 ))
+
+echo ""
+echo "============================================================"
+echo "convgeno: search array task $SLURM_ARRAY_TASK_ID finished"
+echo "Commands run: $((END_LINE - START_LINE + 1))"
+echo "Failed: $FAILED"
+echo "Duration: ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
+echo "============================================================"
+
+if [ $FAILED -gt 0 ]; then
+    echo "WARNING: $FAILED command(s) failed. Check logs above."
+    exit 1
+fi
+
+exit 0
+"""
+    return script
+
+
+def generate_resume_script(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
+    """Generate SLURM script for OrthoFinder's resume phase (``-b``).
+
+    Runs on a single node after all search array tasks complete. Resumes
+    OrthoFinder from pre-computed search results, performing clustering,
+    MSA, and tree inference.
+
+    The generated script:
+
+    * Attempts to raise the open-file limit via ``ulimit -n`` (wrapped
+      in ``if`` so ``set -e`` does not abort if the kernel refuses).
+    * Sets ``TMPDIR`` to a project-local temp directory to avoid filling
+      ``/dev/shm`` or ``/tmp``.
+    * Cleans up ``$TMPDIR`` on success, preserves it on failure.
+    * Uses either the user-specified ``analysis_threads`` or a value
+      derived from :func:`choose_analysis_threads`.
+    """
+    _validate_has_orthofinder(config)
+    assert config.orthofinder is not None
+    resolved_runtime = _resolve_runtime(config, runtime)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = _build_sbatch_header(
+        config,
+        overrides={
+            "--job-name": "convgeno_of_resume",
+            "--nodes": "1",
+            "--ntasks": "1",
+            "--cpus-per-task": str(config.slurm.cpus_per_task),
+            "--time": config.slurm.time_limit,
+        },
+    )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
+
+    # Resolve analysis threads: explicit value or heuristic.
+    if config.orthofinder.analysis_threads is not None:
+        analysis_threads = config.orthofinder.analysis_threads
+    else:
+        analysis_threads = choose_analysis_threads(
+            config.slurm.cpus_per_task,
+            config.slurm.open_file_limit,
+        )
+
+    extra = " ".join(config.orthofinder.extra_args)
+    extra_suffix = f" {extra}" if extra else ""
+
+    # Build the ulimit block.  If no limit is configured, just print
+    # the current value; otherwise try to raise it.
+    open_file_limit = config.slurm.open_file_limit
+    if open_file_limit is not None:
+        ulimit_block = f"""\
+REQUESTED_OPEN_FILE_LIMIT="{open_file_limit}"
+
+echo "Open-file limit before adjustment: $(ulimit -n || echo unknown)"
+
+if ulimit -n "$REQUESTED_OPEN_FILE_LIMIT" 2>/dev/null; then
+    echo "Open-file limit raised to: $(ulimit -n)"
+else
+    echo "WARNING: Could not raise open-file limit to $REQUESTED_OPEN_FILE_LIMIT."
+    echo "Continuing with current open-file limit: $(ulimit -n || echo unknown)"
+fi"""
+    else:
+        ulimit_block = """\
+echo "Open-file limit (current): $(ulimit -n || echo unknown)"
+"""
+
+    script = f"""\
+#!/bin/bash
+# ============================================================
+# OrthoFinder resume phase (-b) — multi-node mode
+# Generated by convgeno on {timestamp}
+# ============================================================
+
+{header}
+
+set -euo pipefail
+
+{bootstrap_block}
+
+echo "============================================================"
+echo "convgeno: OrthoFinder resume phase started"
+echo "Job ID:    $SLURM_JOB_ID"
+echo "Node:      $HOSTNAME"
+echo "Start:     $(date)"
+echo "============================================================"
+
+START_SECONDS=$SECONDS
+
+# ---- Open-file limit ----
+{ulimit_block}
+
+OUTPUT_DIR="{config.orthofinder.output_dir}"
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
+
+# The prepare script wrote the WorkingDirectory path to a pointer file
+# in $OUTPUT_PARENT. Read it directly — no find-fallback, since a
+# missing pointer means the prepare job failed and we should abort.
+if [ ! -f "$WORK_DIR_FILE" ]; then
+    echo "ERROR: WorkingDirectory pointer not found: $WORK_DIR_FILE"
+    echo "The prepare job may have failed."
+    exit 1
+fi
+
+WORK_DIR="$(cat "$WORK_DIR_FILE")"
+
+if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+    echo "ERROR: WorkingDirectory not found or unreadable: $WORK_DIR"
+    exit 1
+fi
+
+# ---- Project-local TMPDIR ----
+export TMPDIR="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
+mkdir -p "$TMPDIR"
+echo "TMPDIR=$TMPDIR"
+
+TOTAL_THREADS={config.orthofinder.search_threads}
+ANALYSIS_THREADS={analysis_threads}
+
+echo "Resuming OrthoFinder from: $WORK_DIR"
+echo "Search threads (-t): $TOTAL_THREADS"
+echo "Analysis threads (-a): $ANALYSIS_THREADS"
+echo ""
+
+orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS"{extra_suffix}
+
+OF_EXIT=$?
+
+ELAPSED=$(( SECONDS - START_SECONDS ))
+HOURS=$(( ELAPSED / 3600 ))
+MINUTES=$(( (ELAPSED % 3600) / 60 ))
+SECS=$(( ELAPSED % 60 ))
+
+echo ""
+echo "============================================================"
+echo "convgeno: resume phase finished"
+echo "Exit code: $OF_EXIT"
+echo "End:       $(date)"
+echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
+echo "============================================================"
+
+if [ "$OF_EXIT" -eq 0 ]; then
+    echo "OrthoFinder completed successfully. Cleaning up TMPDIR: $TMPDIR"
+    rm -rf "$TMPDIR"
+
+    if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
+        echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
+        echo "Check $OUTPUT_DIR for a Results_* directory."
+    fi
+
+    echo "OrthoFinder multi-node run completed successfully."
+else
+    echo "OrthoFinder exited with code $OF_EXIT. Preserving TMPDIR for debugging: $TMPDIR"
+fi
+
+exit "$OF_EXIT"
+"""
+    return script
