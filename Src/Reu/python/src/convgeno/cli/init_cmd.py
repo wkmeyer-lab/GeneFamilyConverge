@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
-from convgeno.slurm.discovery import discover_partitions
+from convgeno.slurm.discovery import detect_node_cpus, discover_partitions
 from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     detect_conda_runtime,
@@ -120,7 +120,20 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print("\nNo SLURM partitions detected (sinfo not available).")
         partition_name = _prompt("Enter your SLURM partition name")
 
-    cpus_per_task = _prompt_int("CPUs per task", default=16)
+    cpu_detection = detect_node_cpus(partition_name)
+    recommended_cpus = cpu_detection["recommended_physical"] or 16
+    print(
+        f"Detected {cpu_detection['node_count']} nodes in '{partition_name}', "
+        f"{cpu_detection['min_cpus_per_node']} CPUs/node "
+        f"(physical: {cpu_detection['physical_cores']}, "
+        f"threads/core: {cpu_detection['threads_per_core']})"
+    )
+    print(
+        f"Recommended CPUs per task: {recommended_cpus} "
+        "(reserves 4 cores for memory headroom)"
+    )
+
+    cpus_per_task = _prompt_int("CPUs per task", default=recommended_cpus)
     if (
         selected_partition is not None
         and selected_partition.max_cpus_per_node > 0

@@ -1,7 +1,8 @@
-"""SLURM partition discovery via sinfo."""
+"""SLURM partition discovery and per-node CPU detection via sinfo."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import List
@@ -92,3 +93,83 @@ def discover_partitions() -> List[PartitionInfo]:
         return partitions
     except Exception:
         return []
+
+
+def _empty_node_cpu_detection() -> dict[str, int]:
+    return {
+        "min_cpus_per_node": 0,
+        "max_cpus_per_node": 0,
+        "recommended_cpus": 0,
+        "threads_per_core": 1,
+        "physical_cores": 0,
+        "recommended_physical": 16,
+        "node_count": 0,
+    }
+
+
+def detect_node_cpus(partition: str) -> dict[str, int]:
+    """Detect CPU counts and physical-core defaults for a SLURM partition.
+
+    The recommendation uses the smallest node in the partition so jobs can
+    land on any node. It reserves four physical cores as memory-bandwidth
+    headroom, with a floor of eight cores, and falls back to the historical
+    static default when SLURM commands are unavailable.
+    """
+    try:
+        sinfo_result = subprocess.run(
+            ["sinfo", "-p", partition, "-N", "--noheader", "-o", "%N %c"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return _empty_node_cpu_detection()
+
+    if sinfo_result.returncode != 0:
+        return _empty_node_cpu_detection()
+
+    node_names: list[str] = []
+    cpu_counts: list[int] = []
+    for line in sinfo_result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        try:
+            cpu_count = int(parts[1])
+        except ValueError:
+            continue
+        node_names.append(parts[0])
+        cpu_counts.append(cpu_count)
+
+    if not cpu_counts:
+        return _empty_node_cpu_detection()
+
+    threads_per_core = 1
+    try:
+        scontrol_result = subprocess.run(
+            ["scontrol", "show", "node", node_names[0]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if scontrol_result.returncode == 0:
+            match = re.search(r"\bThreadsPerCore=(\d+)\b", scontrol_result.stdout)
+            if match is not None:
+                detected_threads = int(match.group(1))
+                if detected_threads > 0:
+                    threads_per_core = detected_threads
+    except Exception:
+        threads_per_core = 1
+
+    min_cpus = min(cpu_counts)
+    max_cpus = max(cpu_counts)
+    physical_cores = min_cpus // threads_per_core
+    return {
+        "min_cpus_per_node": min_cpus,
+        "max_cpus_per_node": max_cpus,
+        "recommended_cpus": max(min_cpus - 4, 8),
+        "threads_per_core": threads_per_core,
+        "physical_cores": physical_cores,
+        "recommended_physical": max(physical_cores - 4, 8),
+        "node_count": len(cpu_counts),
+    }

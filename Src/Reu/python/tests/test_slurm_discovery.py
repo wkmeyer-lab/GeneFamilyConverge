@@ -6,14 +6,14 @@ Run with:  pytest tests/test_slurm_discovery.py -v
 
 from __future__ import annotations
 
-from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from convgeno.slurm.discovery import (
     PartitionInfo,
     _parse_sinfo_line,
+    detect_node_cpus,
     discover_partitions,
 )
 
@@ -67,9 +67,7 @@ class TestDiscoverPartitions:
 
     @patch("convgeno.slurm.discovery.subprocess.run")
     def test_parses_multiline_output(self, mock_run):
-        mock_run.return_value = CompletedProcess(
-            args=[], returncode=0, stdout=MOCK_SINFO_OUTPUT,
-        )
+        mock_run.return_value = Mock(returncode=0, stdout=MOCK_SINFO_OUTPUT)
         partitions = discover_partitions()
         assert len(partitions) == 3
         assert partitions[0].name == "hawkcpu"
@@ -80,10 +78,110 @@ class TestDiscoverPartitions:
 
     @patch("convgeno.slurm.discovery.subprocess.run")
     def test_nonzero_return_code(self, mock_run):
-        mock_run.return_value = CompletedProcess(
-            args=[], returncode=1, stdout="",
-        )
+        mock_run.return_value = Mock(returncode=1, stdout="")
         assert discover_partitions() == []
+
+
+class TestDetectNodeCpus:
+    def test_typical_homogeneous_partition(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(
+                    returncode=0,
+                    stdout="hawk-a001 52\nhawk-a002 52\nhawk-a003 52\n",
+                ),
+                Mock(returncode=0, stdout="NodeName=hawk-a001 ThreadsPerCore=1"),
+            ],
+        ):
+            detected = detect_node_cpus("hawkcpu")
+
+        assert detected["min_cpus_per_node"] == 52
+        assert detected["max_cpus_per_node"] == 52
+        assert detected["recommended_cpus"] == 48
+        assert detected["threads_per_core"] == 1
+        assert detected["physical_cores"] == 52
+        assert detected["recommended_physical"] == 48
+        assert detected["node_count"] == 3
+
+    def test_heterogeneous_partition(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="hawk-a001 52\nsol-f709 56\n"),
+                Mock(returncode=0, stdout="NodeName=hawk-a001 ThreadsPerCore=1"),
+            ],
+        ):
+            detected = detect_node_cpus("hawkcpu")
+
+        assert detected["min_cpus_per_node"] == 52
+        assert detected["max_cpus_per_node"] == 56
+        assert detected["recommended_physical"] == 48
+
+    def test_hyperthreaded_nodes(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="hyper-a001 104\nhyper-a002 104\n"),
+                Mock(returncode=0, stdout="NodeName=hyper-a001 ThreadsPerCore=2"),
+            ],
+        ):
+            detected = detect_node_cpus("hyper")
+
+        assert detected["physical_cores"] == 52
+        assert detected["recommended_physical"] == 48
+
+    def test_small_node(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="small-a001 12\nsmall-a002 12\n"),
+                Mock(returncode=0, stdout="NodeName=small-a001 ThreadsPerCore=1"),
+            ],
+        ):
+            detected = detect_node_cpus("small")
+
+        assert detected["recommended_physical"] == 8
+
+    def test_very_small_node(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="tiny-a001 8\n"),
+                Mock(returncode=0, stdout="NodeName=tiny-a001 ThreadsPerCore=1"),
+            ],
+        ):
+            detected = detect_node_cpus("tiny")
+
+        assert detected["recommended_physical"] == 8
+
+    @patch("convgeno.slurm.discovery.subprocess.run", side_effect=FileNotFoundError)
+    def test_sinfo_fails(self, mock_run):
+        detected = detect_node_cpus("missing")
+
+        assert detected["min_cpus_per_node"] == 0
+        assert detected["max_cpus_per_node"] == 0
+        assert detected["recommended_cpus"] == 0
+        assert detected["threads_per_core"] == 1
+        assert detected["physical_cores"] == 0
+        assert detected["recommended_physical"] == 16
+        assert detected["node_count"] == 0
+
+    def test_scontrol_fails_gracefully(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="hawk-a001 52\nhawk-a002 52\n"),
+                RuntimeError("scontrol unavailable"),
+            ],
+        ):
+            detected = detect_node_cpus("hawkcpu")
+
+        assert detected["min_cpus_per_node"] == 52
+        assert detected["max_cpus_per_node"] == 52
+        assert detected["threads_per_core"] == 1
+        assert detected["physical_cores"] == 52
+        assert detected["recommended_physical"] == 48
 
 
 class TestPartitionInfoStr:
