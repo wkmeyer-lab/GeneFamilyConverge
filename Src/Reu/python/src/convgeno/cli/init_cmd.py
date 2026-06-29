@@ -83,6 +83,16 @@ def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
     return recommended_physical, max(recommended_physical // 4, 1)
 
 
+def _parse_aligner_choice(user_input: str) -> str:
+    """Parse an interactive OrthoFinder MSA aligner choice."""
+    choice = user_input.strip().lower()
+    if choice in {"", "1", "mafft"}:
+        return "mafft"
+    if choice in {"2", "famsa"}:
+        return "famsa"
+    return "mafft"
+
+
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
     """Run the interactive init wizard to create pipeline_config.yaml."""
     path = Path(output_path)
@@ -151,6 +161,21 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         f"OrthoFinder threads: -t {search_threads} (sequence search), "
         f"-a {analysis_threads} (analysis)"
     )
+    print("MSA aligner for OrthoFinder gene tree inference:")
+    print(
+        "  [1] mafft  — slower, more accurate "
+        "(recommended: species tree used for state reconstruction)"
+    )
+    print(
+        "  [2] famsa  — faster, slightly less accurate "
+        "(use for large datasets where speed matters)"
+    )
+    msa_program = _parse_aligner_choice(_prompt("Select MSA aligner", default="1"))
+    if msa_program == "famsa":
+        print(
+            "Using FAMSA. Ensure it is installed in your conda environment: "
+            "conda install -c bioconda famsa"
+        )
     if (
         selected_partition is not None
         and selected_partition.max_cpus_per_node > 0
@@ -229,6 +254,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         output_dir=str(project_path / "Data/processed/orthofinder"),
         search_threads=search_threads,
         analysis_threads=analysis_threads,
+        msa_program=msa_program,
     )
 
     # ---- Detect conda runtime configuration ----
@@ -293,6 +319,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  Scratch directory:  {scratch_base if scratch_base is not None else 'not set'}")
     print(f"  OrthoFinder -t:     {search_threads}")
     print(f"  OrthoFinder -a:     {analysis_threads}")
+    print(f"  OrthoFinder MSA:    {msa_program}")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")

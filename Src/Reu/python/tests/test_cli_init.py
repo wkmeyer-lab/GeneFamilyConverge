@@ -11,7 +11,11 @@ from unittest.mock import patch
 
 import pytest
 
-from convgeno.cli.init_cmd import _derive_orthofinder_threads, run_init
+from convgeno.cli.init_cmd import (
+    _derive_orthofinder_threads,
+    _parse_aligner_choice,
+    run_init,
+)
 from convgeno.slurm.config import PipelineConfig
 from convgeno.slurm.discovery import PartitionInfo
 
@@ -67,6 +71,26 @@ class TestDeriveOrthoFinderThreads:
         assert analysis_threads == 4
 
 
+class TestParseAlignerChoice:
+    def test_parse_aligner_default_empty(self):
+        assert _parse_aligner_choice("") == "mafft"
+
+    def test_parse_aligner_1(self):
+        assert _parse_aligner_choice("1") == "mafft"
+
+    def test_parse_aligner_2(self):
+        assert _parse_aligner_choice("2") == "famsa"
+
+    def test_parse_aligner_mafft_string(self):
+        assert _parse_aligner_choice("mafft") == "mafft"
+
+    def test_parse_aligner_famsa_string(self):
+        assert _parse_aligner_choice("FAMSA") == "famsa"
+
+    def test_parse_aligner_invalid_falls_back(self):
+        assert _parse_aligner_choice("muscle") == "mafft"
+
+
 class TestInitCreatesConfig:
     def test_happy_path_with_partitions(self, tmp_path: Path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -77,6 +101,7 @@ class TestInitCreatesConfig:
             "convgeno",     # conda env
             "1",            # select partition (hawkcpu)
             "",             # accept recommended cpus per task
+            "",             # accept default MSA aligner
             "72:00:00",     # time limit
             "",             # mail user (skip)
             "",             # account (skip)
@@ -119,6 +144,7 @@ class TestInitCreatesConfig:
         assert loaded.orthofinder is not None
         assert loaded.orthofinder.search_threads == 48
         assert loaded.orthofinder.analysis_threads == 12
+        assert loaded.orthofinder.msa_program == "mafft"
 
     def test_no_partitions_detected(self, tmp_path: Path):
         output = tmp_path / "config.yaml"
@@ -128,6 +154,7 @@ class TestInitCreatesConfig:
             "myenv",               # conda env
             "gpu-partition",       # manually typed partition
             "32",                  # cpus
+            "2",                   # famsa aligner
             "24:00:00",            # time limit
             "user@example.com",    # mail
             "myaccount",           # account
@@ -155,6 +182,8 @@ class TestInitCreatesConfig:
         assert loaded.slurm.mail_user == "user@example.com"
         assert loaded.slurm.account == "myaccount"
         assert loaded.conda_env == "myenv"
+        assert loaded.orthofinder is not None
+        assert loaded.orthofinder.msa_program == "famsa"
 
 
 class TestInitOverwriteBehaviour:
@@ -177,6 +206,7 @@ class TestInitOverwriteBehaviour:
             "convgeno",   # conda env
             "testpart",   # partition (no sinfo)
             "8",          # cpus
+            "",           # aligner
             "12:00:00",   # time
             "",           # mail (skip)
             "",           # account (skip)
@@ -217,6 +247,7 @@ class TestInitWarnings:
             "convgeno",     # env
             "1",            # select partition
             "32",           # cpus (exceeds 8)
+            "",             # aligner
             "72:00:00",     # time
             "",             # mail
             "",             # account
