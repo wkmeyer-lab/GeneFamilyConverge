@@ -179,3 +179,38 @@ class TestOpenFileLimitConfig:
         config.save(path)
         loaded = PipelineConfig.load(path)
         assert loaded.slurm.open_file_limit is None
+
+
+class TestScratchConfig:
+    def test_scratch_dir_in_to_dict(self):
+        cfg = SlurmConfig(partition="hawkcpu", scratch_dir="/scratch/user")
+
+        assert cfg.to_dict()["scratch_dir"] == "/scratch/user"
+
+    def test_scratch_dir_default_none(self):
+        cfg = SlurmConfig(partition="hawkcpu")
+
+        assert "scratch_dir" in cfg.to_dict()
+        assert cfg.to_dict()["scratch_dir"] is None
+
+    def test_scratch_dir_from_dict_missing(self):
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu"})
+
+        assert cfg.scratch_dir is None
+
+    def test_scratch_dir_not_in_sbatch_lines(self):
+        cfg = SlurmConfig(partition="hawkcpu", scratch_dir="/scratch/user")
+
+        assert not any("scratch" in line for line in cfg.to_sbatch_lines())
+
+    def test_is_ephemeral_scratch_roundtrip(self):
+        original = SlurmConfig(
+            partition="hawkcpu",
+            scratch_dir="/local/scratch",
+            is_ephemeral_scratch=True,
+        )
+
+        restored = SlurmConfig.from_dict(original.to_dict())
+
+        assert restored.scratch_dir == "/local/scratch"
+        assert restored.is_ephemeral_scratch is True

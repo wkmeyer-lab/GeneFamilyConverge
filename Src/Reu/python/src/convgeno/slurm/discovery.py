@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -173,3 +174,81 @@ def detect_node_cpus(partition: str) -> dict[str, int]:
         "recommended_physical": max(physical_cores - 4, 8),
         "node_count": len(cpu_counts),
     }
+
+
+def _empty_scratch_detection() -> dict[str, str | bool | None]:
+    return {"scratch_base": None, "is_ephemeral": False, "method": "none"}
+
+
+def _is_ephemeral_scratch_path(path: str) -> bool:
+    return path.startswith(("/local", "/tmp", "/dev/shm"))
+
+
+def _usable_scratch_path(path: str, *, create_if_possible: bool) -> str | None:
+    try:
+        if os.path.isdir(path):
+            return path if os.access(path, os.W_OK) else None
+
+        if not create_if_possible:
+            return None
+
+        parent = os.path.dirname(path) or "/"
+        if os.path.isdir(parent) and os.access(parent, os.W_OK):
+            os.makedirs(path, exist_ok=True)
+            if os.path.isdir(path) and os.access(path, os.W_OK):
+                return path
+    except Exception:
+        return None
+    return None
+
+
+def _scratch_path_is_on_home_filesystem(path: str) -> bool:
+    try:
+        return os.stat(path).st_dev == os.stat("/home").st_dev
+    except Exception:
+        return False
+
+
+def detect_scratch_dir() -> dict[str, str | bool | None]:
+    """Detect a writable scratch space root for cluster jobs.
+
+    Environment-provided scratch is preferred, then common shared and
+    node-local scratch locations are probed. Filesystem errors are ignored
+    so init can continue on non-SLURM or restricted systems.
+    """
+    # ## NEW: Honor an explicit environment-provided scratch directory first.
+    scratch_env = os.environ.get("SCRATCH")
+    if scratch_env:
+        scratch_base = _usable_scratch_path(scratch_env, create_if_possible=False)
+        if scratch_base is not None:
+            return {
+                "scratch_base": scratch_base,
+                "is_ephemeral": _is_ephemeral_scratch_path(scratch_base),
+                "method": "env_var",
+            }
+
+    username = os.environ.get("USER", "unknown")
+    candidates = [
+        (f"/share/ceph/scratch/{username}", False),
+        (f"/scratch/{username}", None),
+        ("/local/scratch", True),
+        ("/tmp/scratch", True),
+    ]
+
+    # ## NEW: Probe known cluster scratch paths without raising on failures.
+    for path, fixed_ephemeral in candidates:
+        scratch_base = _usable_scratch_path(path, create_if_possible=True)
+        if scratch_base is None:
+            continue
+        is_ephemeral = (
+            not _scratch_path_is_on_home_filesystem(scratch_base)
+            if fixed_ephemeral is None
+            else fixed_ephemeral
+        )
+        return {
+            "scratch_base": scratch_base,
+            "is_ephemeral": is_ephemeral,
+            "method": "path_probe",
+        }
+
+    return _empty_scratch_detection()

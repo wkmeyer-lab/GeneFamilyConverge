@@ -183,6 +183,65 @@ class TestGenerateOrthoFinderScript:
         assert 'CONDA_BASE="/alt/conda"' in script
         assert 'conda activate "$CONDA_ENV"' in script
 
+    def test_script_without_scratch(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "JOB_SCRATCH" not in script
+        assert "rsync" not in script
+        assert "SCRATCH_INPUT" not in script
+        assert "cleanup_scratch" not in script
+
+    def test_script_with_scratch(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
+                output_dir="/share/ceph/project/Data/processed/orthofinder",
+            ),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'JOB_SCRATCH="/share/ceph/scratch/testuser/${SLURM_JOB_ID}"' in script
+        assert "SCRATCH_INPUT=" in script
+        assert "SCRATCH_OUTPUT=" in script
+        assert "export TMPDIR=" in script
+        assert script.count("rsync -a") >= 2
+        assert "cleanup_scratch" in script
+        assert "trap cleanup_scratch" in script
+        assert 'orthofinder -f "$EFFECTIVE_INPUT" -o "$EFFECTIVE_OUTPUT"' in script
+        assert "orthofinder -f /share/ceph/project/Data/interim/cleaned_proteomes" not in script
+
+    def test_scratch_cleanup_present(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' in script
+
+    def test_effective_paths_without_scratch(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "-f /share/ceph/project/Data/interim/cleaned_proteomes" in script
+        assert "-o /share/ceph/project/Data/processed/orthofinder" in script
+        assert "$EFFECTIVE_INPUT" not in script
+        assert "$EFFECTIVE_OUTPUT" not in script
+
 
 class TestWriteScript:
     def test_creates_file(self, tmp_path: Path):

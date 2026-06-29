@@ -90,6 +90,14 @@ class TestInitCreatesConfig:
                     "node_count": 3,
                 },
             ),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
             patch("builtins.input", side_effect=inputs),
         ):
             run_init(output_path=str(output))
@@ -121,6 +129,14 @@ class TestInitCreatesConfig:
 
         with (
             patch("convgeno.cli.init_cmd.discover_partitions", return_value=[]),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
             patch("builtins.input", side_effect=inputs),
         ):
             run_init(output_path=str(output))
@@ -163,6 +179,14 @@ class TestInitOverwriteBehaviour:
 
         with (
             patch("convgeno.cli.init_cmd.discover_partitions", return_value=[]),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
             patch("builtins.input", side_effect=inputs),
         ):
             run_init(output_path=str(config_path))
@@ -197,6 +221,14 @@ class TestInitWarnings:
         output = tmp_path / "config.yaml"
         with (
             patch("convgeno.cli.init_cmd.discover_partitions", return_value=[small]),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
             patch("builtins.input", side_effect=inputs),
         ):
             run_init(output_path=str(output))

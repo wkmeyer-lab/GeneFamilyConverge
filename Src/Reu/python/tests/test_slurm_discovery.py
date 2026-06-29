@@ -14,6 +14,7 @@ from convgeno.slurm.discovery import (
     PartitionInfo,
     _parse_sinfo_line,
     detect_node_cpus,
+    detect_scratch_dir,
     discover_partitions,
 )
 
@@ -182,6 +183,86 @@ class TestDetectNodeCpus:
         assert detected["threads_per_core"] == 1
         assert detected["physical_cores"] == 52
         assert detected["recommended_physical"] == 48
+
+
+class TestDetectScratchDir:
+    def test_scratch_env_var(self, tmp_path):
+        with patch.dict(
+            "os.environ",
+            {"SCRATCH": str(tmp_path), "USER": "testuser"},
+            clear=True,
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] == str(tmp_path)
+        assert detected["method"] == "env_var"
+
+    def test_ceph_scratch_found(self):
+        username = "testuser"
+        scratch_path = f"/share/ceph/scratch/{username}"
+
+        with (
+            patch.dict("os.environ", {"USER": username}, clear=True),
+            patch(
+                "convgeno.slurm.discovery.os.path.isdir",
+                side_effect=lambda path: path == scratch_path,
+            ),
+            patch("convgeno.slurm.discovery.os.access", return_value=True),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] == scratch_path
+        assert detected["is_ephemeral"] is False
+        assert detected["method"] == "path_probe"
+
+    def test_local_scratch_is_ephemeral(self):
+        with (
+            patch.dict("os.environ", {"USER": "testuser"}, clear=True),
+            patch(
+                "convgeno.slurm.discovery.os.path.isdir",
+                side_effect=lambda path: path == "/local/scratch",
+            ),
+            patch("convgeno.slurm.discovery.os.access", return_value=True),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] == "/local/scratch"
+        assert detected["is_ephemeral"] is True
+        assert detected["method"] == "path_probe"
+
+    def test_no_scratch_found(self):
+        with (
+            patch.dict("os.environ", {"USER": "testuser"}, clear=True),
+            patch("convgeno.slurm.discovery.os.path.isdir", return_value=False),
+            patch("convgeno.slurm.discovery.os.access", return_value=False),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] is None
+        assert detected["method"] == "none"
+
+    def test_scratch_not_writable_skipped(self):
+        with (
+            patch.dict("os.environ", {"USER": "testuser"}, clear=True),
+            patch("convgeno.slurm.discovery.os.path.isdir", return_value=True),
+            patch("convgeno.slurm.discovery.os.access", return_value=False),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] is None
+
+    def test_filesystem_error_handled(self):
+        with (
+            patch.dict("os.environ", {"USER": "testuser"}, clear=True),
+            patch(
+                "convgeno.slurm.discovery.os.path.isdir",
+                side_effect=OSError("filesystem unavailable"),
+            ),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] is None
+        assert detected["method"] == "none"
 
 
 class TestPartitionInfoStr:

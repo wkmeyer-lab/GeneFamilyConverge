@@ -48,11 +48,19 @@ class SlurmConfig:
     output_pattern: str = "logs/%x_%j.out"
     error_pattern: str = "logs/%x_%j.err"
     open_file_limit: Optional[int] = None
+    scratch_dir: str | None = None  # Scratch space root. None = run in output_dir.
+    is_ephemeral_scratch: bool = False  # True when scratch is node-local.
     extra_sbatch_args: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Serialize to a dict, omitting fields whose value is ``None``."""
-        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+        # ## NEW: Keep scratch fields visible in YAML as run-time documentation.
+        always_include = {"scratch_dir", "is_ephemeral_scratch"}
+        return {
+            k: v
+            for k, v in dataclasses.asdict(self).items()
+            if v is not None or k in always_include
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> SlurmConfig:

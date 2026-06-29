@@ -6,7 +6,11 @@ from pathlib import Path
 
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
-from convgeno.slurm.discovery import detect_node_cpus, discover_partitions
+from convgeno.slurm.discovery import (
+    detect_node_cpus,
+    detect_scratch_dir,
+    discover_partitions,
+)
 from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     detect_conda_runtime,
@@ -158,6 +162,31 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             f"CPUs per node."
         )
 
+    # ## NEW: Detect scratch space for OrthoFinder's intermediate-file workload.
+    scratch_detection = detect_scratch_dir()
+    scratch_base = scratch_detection["scratch_base"]
+    is_ephemeral_scratch = bool(scratch_detection["is_ephemeral"])
+    if scratch_base is not None:
+        scratch_kind = (
+            "ephemeral — results will be copied back before job ends"
+            if is_ephemeral_scratch
+            else "persistent"
+        )
+        print(f"Detected scratch space: {scratch_base} ({scratch_kind})")
+        print(
+            "Using scratch will improve I/O performance for OrthoFinder's "
+            "many intermediate files."
+        )
+    else:
+        print(
+            "No scratch space detected. OrthoFinder will run directly in the "
+            "output directory."
+        )
+        print(
+            "This may be slower on shared filesystems (e.g., Ceph) due to "
+            "I/O pressure from intermediate files."
+        )
+
     time_limit = _prompt("Job time limit (HH:MM:SS or D-HH:MM:SS)", default="72:00:00")
     if ":" not in time_limit:
         print(
@@ -191,6 +220,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         mail_user=mail_user,
         account=account,
         open_file_limit=open_file_limit,
+        scratch_dir=str(scratch_base) if scratch_base is not None else None,
+        is_ephemeral_scratch=is_ephemeral_scratch,
     )
     project_path = Path(project_dir)
     orthofinder = OrthoFinderConfig(
@@ -259,6 +290,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
     print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")
+    print(f"  Scratch directory:  {scratch_base if scratch_base is not None else 'not set'}")
     print(f"  OrthoFinder -t:     {search_threads}")
     print(f"  OrthoFinder -a:     {analysis_threads}")
     if runtime_config is not None:
