@@ -204,6 +204,45 @@ class TestValidateOrthofinderOutputDir:
 
 
 class TestRunGenerateOutputDirValidation:
+    def test_timestamped_output_not_blocked_by_static_orthofinder_gitkeep(
+        self, tmp_path: Path
+    ):
+        proteomes = tmp_path / "proteomes"
+        proteomes.mkdir()
+        for name in ["Sp1", "Sp2", "Sp3", "Sp4"]:
+            (proteomes / f"{name}.fa").write_text(">g\nMK\n")
+
+        static_output = tmp_path / "Data" / "processed" / "orthofinder"
+        static_output.mkdir(parents=True)
+        (static_output / ".gitkeep").write_text("", encoding="utf-8")
+        timestamped_output = (
+            tmp_path
+            / "Data"
+            / "processed"
+            / "orthofinder_single_20260629_181530"
+        )
+
+        config = PipelineConfig(
+            project_dir=str(tmp_path),
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(
+                input_dir=str(proteomes),
+                output_dir=str(timestamped_output),
+            ),
+            runtime=_TEST_RUNTIME,
+        )
+        config_path = tmp_path / "config.yaml"
+        config.save(config_path)
+
+        script_path = run_generate(
+            config_path=str(config_path),
+            script_path=str(tmp_path / "job.sh"),
+        )
+
+        assert script_path.exists()
+        assert static_output.exists()
+        assert not timestamped_output.exists()
+
     def test_fails_if_output_dir_already_exists(self, tmp_path: Path):
         # Build a config where output_dir already exists on disk.
         proteomes = tmp_path / "proteomes"

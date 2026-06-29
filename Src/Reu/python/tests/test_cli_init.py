@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from convgeno.cli.init_cmd import (
+    _default_orthofinder_output_dir,
     _derive_orthofinder_threads,
     _parse_aligner_choice,
     run_init,
@@ -91,10 +92,25 @@ class TestParseAlignerChoice:
         assert _parse_aligner_choice("muscle") == "mafft"
 
 
+class TestDefaultOrthoFinderOutputDir:
+    def test_default_orthofinder_output_dir_uses_timestamp(self):
+        path = _default_orthofinder_output_dir(
+            Path("/project"),
+            timestamp="20260629_181530",
+        )
+
+        assert path == Path(
+            "/project/Data/processed/orthofinder_single_20260629_181530"
+        )
+
+
 class TestInitCreatesConfig:
     def test_happy_path_with_partitions(self, tmp_path: Path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         output = tmp_path / "pipeline_config.yaml"
+        static_output_dir = tmp_path / "Data" / "processed" / "orthofinder"
+        static_output_dir.mkdir(parents=True)
+        (static_output_dir / ".gitkeep").write_text("", encoding="utf-8")
 
         inputs = iter([
             str(tmp_path),  # project directory
@@ -145,6 +161,16 @@ class TestInitCreatesConfig:
         assert loaded.orthofinder.search_threads == 48
         assert loaded.orthofinder.analysis_threads == 12
         assert loaded.orthofinder.msa_program == "mafft"
+        output_dir = Path(loaded.orthofinder.output_dir)
+        assert output_dir.parent == tmp_path / "Data" / "processed"
+        assert output_dir.name.startswith("orthofinder_single_")
+        timestamp_suffix = output_dir.name.removeprefix("orthofinder_single_")
+        assert len(timestamp_suffix) == 15
+        assert timestamp_suffix[8] == "_"
+        assert timestamp_suffix[:8].isdigit()
+        assert timestamp_suffix[9:].isdigit()
+        assert output_dir != static_output_dir
+        assert not output_dir.exists()
 
     def test_no_partitions_detected(self, tmp_path: Path):
         output = tmp_path / "config.yaml"

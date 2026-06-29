@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from convgeno.external.config import OrthoFinderConfig
@@ -91,6 +92,21 @@ def _parse_aligner_choice(user_input: str) -> str:
     if choice in {"2", "famsa"}:
         return "famsa"
     return "mafft"
+
+
+def _default_orthofinder_output_dir(
+    project_dir: Path,
+    *,
+    timestamp: str | None = None,
+) -> Path:
+    """Return a fresh timestamped default output path for single-node OrthoFinder."""
+    run_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    return (
+        project_dir
+        / "Data"
+        / "processed"
+        / f"orthofinder_single_{run_timestamp}"
+    )
 
 
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
@@ -251,7 +267,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     project_path = Path(project_dir)
     orthofinder = OrthoFinderConfig(
         input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
-        output_dir=str(project_path / "Data/processed/orthofinder"),
+        output_dir=str(_default_orthofinder_output_dir(project_path)),
         search_threads=search_threads,
         analysis_threads=analysis_threads,
         msa_program=msa_program,
