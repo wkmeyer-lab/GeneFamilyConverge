@@ -9,26 +9,35 @@ from convgeno.slurm.config import PipelineConfig
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 
-def _orthofinder_command_with_paths(
-    args: list[str],
-    input_arg: str,
-    output_arg: str,
-) -> str:
-    rebuilt: list[str] = []
-    replace_next: str | None = None
-    for arg in args:
-        if replace_next == "-f":
-            rebuilt.append(input_arg)
-            replace_next = None
-            continue
-        if replace_next == "-o":
-            rebuilt.append(output_arg)
-            replace_next = None
-            continue
-        rebuilt.append(arg)
-        if arg in {"-f", "-o"}:
-            replace_next = arg
-    return "orthofinder " + " ".join(rebuilt)
+def _orthofinder_command_block(config: PipelineConfig) -> str:
+    if config.orthofinder is None:
+        raise ValueError("OrthoFinder settings not found in pipeline config.")
+
+    lines = [
+        "orthofinder \\",
+        '  -f "$EFFECTIVE_INPUT" \\',
+        '  -o "$EFFECTIVE_OUTPUT" \\',
+        '  -t "$ORTHOFINDER_SEARCH_THREADS" \\',
+        '  -a "$ORTHOFINDER_ANALYSIS_THREADS" \\',
+        f"  -S {config.orthofinder.sequence_search}",
+    ]
+    if config.orthofinder.msa_program:
+        lines[-1] += " \\"
+        lines.extend(
+            [
+                "  -M msa \\",
+                '  -A "$ORTHOFINDER_MSA_PROGRAM"',
+            ]
+        )
+        if config.orthofinder.tree_program:
+            lines[-1] += " \\"
+            lines.append(f"  -T {config.orthofinder.tree_program}")
+
+    for extra_arg in config.orthofinder.extra_args:
+        lines[-1] += " \\"
+        lines.append(f"  {extra_arg}")
+
+    return "\n".join(lines)
 
 
 def generate_orthofinder_script(
@@ -78,23 +87,9 @@ def generate_orthofinder_script(
     sbatch_lines.insert(0, "#SBATCH --job-name=convgeno_orthofinder")
     sbatch_lines.append("#SBATCH --export=ALL")
 
-    of_args = config.orthofinder.to_command_args()
     scratch_dir = config.slurm.scratch_dir
     scratch_enabled = scratch_dir is not None
-    # ## NEW: Build scratch-aware OrthoFinder paths while preserving direct runs.
-    if scratch_enabled:
-        of_command = _orthofinder_command_with_paths(
-            of_args,
-            '"$EFFECTIVE_INPUT"',
-            '"$EFFECTIVE_OUTPUT"',
-        )
-    else:
-        of_command = _orthofinder_command_with_paths(
-            of_args,
-            config.orthofinder.input_dir,
-            config.orthofinder.output_dir,
-        )
-    of_command_for_echo = of_command.replace('"', '\\"')
+    of_command = _orthofinder_command_block(config)
 
     scratch_setup_block = ""
     scratch_copy_inputs_block = ""
@@ -194,6 +189,11 @@ echo ""
 
 INPUT_DIR="{config.orthofinder.input_dir}"
 OUTPUT_DIR="{config.orthofinder.output_dir}"
+EFFECTIVE_INPUT="$INPUT_DIR"
+EFFECTIVE_OUTPUT="$OUTPUT_DIR"
+ORTHOFINDER_SEARCH_THREADS="{config.orthofinder.search_threads}"
+ORTHOFINDER_ANALYSIS_THREADS="{config.orthofinder.analysis_threads if config.orthofinder.analysis_threads is not None else 1}"
+ORTHOFINDER_MSA_PROGRAM="{config.orthofinder.msa_program}"
 {scratch_setup_block}
 # ------------------------------------------------------------
 # Validate inputs
@@ -231,12 +231,16 @@ fi
 # Run OrthoFinder
 # ------------------------------------------------------------
 echo "Running OrthoFinder..."
-echo "Command: {of_command_for_echo}"
+echo "Command:"
+cat <<'CONVGENO_ORTHOFINDER_COMMAND'
+{of_command}
+CONVGENO_ORTHOFINDER_COMMAND
 echo ""
 
+set +e
 {of_command}
-
 EXIT_CODE=$?
+set -e
 {scratch_rsync_back_block}
 
 # ------------------------------------------------------------
@@ -255,9 +259,9 @@ echo "End:       $(date)"
 echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
 echo "============================================================"
 
-if [ $EXIT_CODE -ne 0 ]; then
+if [ "$EXIT_CODE" -ne 0 ]; then
     echo "ERROR: OrthoFinder exited with code $EXIT_CODE"
-    exit $EXIT_CODE
+    exit "$EXIT_CODE"
 fi
 
 # Check that key output files exist
