@@ -54,7 +54,7 @@ def generate_orthofinder_script(
 
     sbatch_lines = config.slurm.to_sbatch_lines()
     sbatch_lines.insert(0, "#SBATCH --job-name=convgeno_orthofinder")
-    sbatch_lines.append("#SBATCH --export=NONE")
+    sbatch_lines.append("#SBATCH --export=ALL")
 
     of_args = config.orthofinder.to_command_args()
     of_command = "orthofinder " + " ".join(of_args)

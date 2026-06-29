@@ -59,7 +59,7 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
         "--mem-per-cpu": config.slurm.mem_per_cpu,
         "--output": config.slurm.output_pattern,
         "--error": config.slurm.error_pattern,
-        "--export": "NONE",
+        "--export": "ALL",
     }
     account = normalize_optional_account(config.slurm.account)
     if account is not None:

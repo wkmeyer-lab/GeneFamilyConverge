@@ -134,9 +134,9 @@ class TestGenerateOrthoFinderScript:
         script = generate_orthofinder_script(config)
         assert "--fewer-files" in script
 
-    def test_generated_script_contains_export_none(self, sample_config):
+    def test_generated_script_contains_export_all(self, sample_config):
         script = generate_orthofinder_script(sample_config)
-        assert "#SBATCH --export=NONE" in script
+        assert "#SBATCH --export=ALL" in script
 
     def test_generated_script_no_conda_info_base(self, sample_config):
         script = generate_orthofinder_script(sample_config)

@@ -451,9 +451,9 @@ class TestCrossCutting:
         for script in self._all_scripts(sample_config):
             assert "conda info --base" not in script
 
-    def test_all_scripts_have_export_none(self, sample_config):
+    def test_all_scripts_have_export_all(self, sample_config):
         for script in self._all_scripts(sample_config):
-            assert "#SBATCH --export=NONE" in script
+            assert "#SBATCH --export=ALL" in script
 
     def test_all_scripts_have_bootstrap_markers(self, sample_config):
         for script in self._all_scripts(sample_config):
