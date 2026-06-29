@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from convgeno.cli.init_cmd import run_init
+from convgeno.cli.init_cmd import _derive_orthofinder_threads, run_init
 from convgeno.slurm.config import PipelineConfig
 from convgeno.slurm.discovery import PartitionInfo
 
@@ -32,6 +32,32 @@ RAPIDS = PartitionInfo(
 )
 
 
+class TestDeriveOrthoFinderThreads:
+    def test_threads_from_48_cpus(self):
+        search_threads, analysis_threads = _derive_orthofinder_threads(48)
+
+        assert search_threads == 48
+        assert analysis_threads == 12
+
+    def test_threads_from_32_cpus(self):
+        search_threads, analysis_threads = _derive_orthofinder_threads(32)
+
+        assert search_threads == 32
+        assert analysis_threads == 8
+
+    def test_threads_from_8_cpus(self):
+        search_threads, analysis_threads = _derive_orthofinder_threads(8)
+
+        assert search_threads == 8
+        assert analysis_threads == 2
+
+    def test_threads_fallback_on_detection_failure(self):
+        search_threads, analysis_threads = _derive_orthofinder_threads(0)
+
+        assert search_threads == 16
+        assert analysis_threads == 4
+
+
 class TestInitCreatesConfig:
     def test_happy_path_with_partitions(self, tmp_path: Path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -41,7 +67,7 @@ class TestInitCreatesConfig:
             str(tmp_path),  # project directory
             "convgeno",     # conda env
             "1",            # select partition (hawkcpu)
-            "16",           # cpus per task
+            "",             # accept recommended cpus per task
             "72:00:00",     # time limit
             "4G",           # memory per cpu
             "",             # mail user (skip)
@@ -52,6 +78,18 @@ class TestInitCreatesConfig:
 
         with (
             patch("convgeno.cli.init_cmd.discover_partitions", return_value=[HAWK, RAPIDS]),
+            patch(
+                "convgeno.cli.init_cmd.detect_node_cpus",
+                return_value={
+                    "min_cpus_per_node": 52,
+                    "max_cpus_per_node": 52,
+                    "recommended_cpus": 48,
+                    "threads_per_core": 1,
+                    "physical_cores": 52,
+                    "recommended_physical": 48,
+                    "node_count": 3,
+                },
+            ),
             patch("builtins.input", side_effect=inputs),
         ):
             run_init(output_path=str(output))
@@ -59,8 +97,11 @@ class TestInitCreatesConfig:
         assert output.exists()
         loaded = PipelineConfig.load(output)
         assert loaded.slurm.partition == "hawkcpu"
-        assert loaded.slurm.cpus_per_task == 16
+        assert loaded.slurm.cpus_per_task == 48
         assert loaded.conda_env == "convgeno"
+        assert loaded.orthofinder is not None
+        assert loaded.orthofinder.search_threads == 48
+        assert loaded.orthofinder.analysis_threads == 12
 
     def test_no_partitions_detected(self, tmp_path: Path):
         output = tmp_path / "config.yaml"

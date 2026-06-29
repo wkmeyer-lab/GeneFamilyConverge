@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
 from convgeno.slurm.discovery import detect_node_cpus, discover_partitions
 from convgeno.slurm.runtime import (
@@ -71,6 +72,13 @@ def _prompt_optional_int(message: str, default: int | None = None) -> int | None
         return _prompt_optional_int(message, default)
 
 
+def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
+    """Derive OrthoFinder search and analysis thread counts."""
+    if recommended_physical <= 0:
+        return 16, 4
+    return recommended_physical, max(recommended_physical // 4, 1)
+
+
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
     """Run the interactive init wizard to create pipeline_config.yaml."""
     path = Path(output_path)
@@ -134,6 +142,11 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     )
 
     cpus_per_task = _prompt_int("CPUs per task", default=recommended_cpus)
+    search_threads, analysis_threads = _derive_orthofinder_threads(cpus_per_task)
+    print(
+        f"OrthoFinder threads: -t {search_threads} (sequence search), "
+        f"-a {analysis_threads} (analysis)"
+    )
     if (
         selected_partition is not None
         and selected_partition.max_cpus_per_node > 0
@@ -179,6 +192,13 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         account=account,
         open_file_limit=open_file_limit,
     )
+    project_path = Path(project_dir)
+    orthofinder = OrthoFinderConfig(
+        input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
+        output_dir=str(project_path / "Data/processed/orthofinder"),
+        search_threads=search_threads,
+        analysis_threads=analysis_threads,
+    )
 
     # ---- Detect conda runtime configuration ----
     print("\n=== Detecting conda runtime ===\n")
@@ -221,6 +241,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         project_dir=project_dir,
         conda_env=conda_env,
         slurm=slurm,
+        orthofinder=orthofinder,
         runtime=runtime_config,
     )
 
@@ -238,6 +259,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
     print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")
+    print(f"  OrthoFinder -t:     {search_threads}")
+    print(f"  OrthoFinder -a:     {analysis_threads}")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")
