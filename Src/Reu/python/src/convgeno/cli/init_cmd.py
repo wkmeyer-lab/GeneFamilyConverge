@@ -194,7 +194,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             "Expected HH:MM:SS or D-HH:MM:SS."
         )
 
-    mem_per_cpu = _prompt("Memory per CPU", default="4G")
+    print("Memory: requesting all available node memory (--mem=0)")
     mail_user = _prompt_optional("Email for SLURM job notifications")
     account = normalize_optional_account(
         _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
@@ -216,7 +216,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         partition=partition_name,
         time_limit=time_limit,
         cpus_per_task=cpus_per_task,
-        mem_per_cpu=mem_per_cpu,
+        mem="0",
         mail_user=mail_user,
         account=account,
         open_file_limit=open_file_limit,
@@ -285,7 +285,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  SLURM partition:    {partition_name}")
     print(f"  CPUs per task:      {cpus_per_task}")
     print(f"  Time limit:         {time_limit}")
-    print(f"  Memory per CPU:     {mem_per_cpu}")
+    print("  Memory:             --mem=0 (all available node memory)")
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")

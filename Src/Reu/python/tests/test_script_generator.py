@@ -52,6 +52,7 @@ class TestGenerateOrthoFinderScript:
         assert "#SBATCH --partition=hawkcpu" in script
         assert "#SBATCH --time=72:00:00" in script
         assert "#SBATCH --cpus-per-task=16" in script
+        assert "#SBATCH --mem=0" in script
         assert "#SBATCH --job-name=convgeno_orthofinder" in script
 
     def test_contains_conda_activation(self, sample_config: PipelineConfig):

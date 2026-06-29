@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -41,7 +42,7 @@ class SlurmConfig:
     nodes: int = 1
     ntasks: int = 1
     cpus_per_task: int = 16
-    mem_per_cpu: str = "4G"
+    mem: str = "0"
     account: Optional[str] = None
     mail_user: Optional[str] = None
     mail_type: str = "END,FAIL"
@@ -81,6 +82,13 @@ class SlurmConfig:
             )
         valid_fields = {f.name for f in dataclasses.fields(cls)}
         extra_sbatch_args = data.pop("extra_sbatch_args", [])
+        if "mem_per_cpu" in data and "mem" not in data:
+            print(
+                "Warning: 'mem_per_cpu' in config is deprecated. "
+                "Using --mem=0 (all node memory) instead. "
+                "Re-run 'convgeno init' to update your config.",
+                file=sys.stderr,
+            )
         filtered = {k: v for k, v in data.items() if k in valid_fields}
         if "account" in filtered:
             filtered["account"] = normalize_optional_account(filtered["account"])
@@ -100,7 +108,7 @@ class SlurmConfig:
             "nodes": "--nodes",
             "ntasks": "--ntasks",
             "cpus_per_task": "--cpus-per-task",
-            "mem_per_cpu": "--mem-per-cpu",
+            "mem": "--mem",
             "mail_user": "--mail-user",
             "mail_type": "--mail-type",
             "output_pattern": "--output",

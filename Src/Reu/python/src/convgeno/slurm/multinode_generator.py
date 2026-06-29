@@ -56,7 +56,7 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
         "--ntasks": str(config.slurm.ntasks),
         "--cpus-per-task": str(config.slurm.cpus_per_task),
         "--time": config.slurm.time_limit,
-        "--mem-per-cpu": config.slurm.mem_per_cpu,
+        "--mem": config.slurm.mem,
         "--output": config.slurm.output_pattern,
         "--error": config.slurm.error_pattern,
         "--export": "ALL",

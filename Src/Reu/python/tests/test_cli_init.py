@@ -69,7 +69,6 @@ class TestInitCreatesConfig:
             "1",            # select partition (hawkcpu)
             "",             # accept recommended cpus per task
             "72:00:00",     # time limit
-            "4G",           # memory per cpu
             "",             # mail user (skip)
             "",             # account (skip)
             "",             # open_file_limit (default 8192)
@@ -106,6 +105,7 @@ class TestInitCreatesConfig:
         loaded = PipelineConfig.load(output)
         assert loaded.slurm.partition == "hawkcpu"
         assert loaded.slurm.cpus_per_task == 48
+        assert loaded.slurm.mem == "0"
         assert loaded.conda_env == "convgeno"
         assert loaded.orthofinder is not None
         assert loaded.orthofinder.search_threads == 48
@@ -120,7 +120,6 @@ class TestInitCreatesConfig:
             "gpu-partition",       # manually typed partition
             "32",                  # cpus
             "24:00:00",            # time limit
-            "8G",                  # memory
             "user@example.com",    # mail
             "myaccount",           # account
             "",                    # open_file_limit (default 8192)
@@ -170,7 +169,6 @@ class TestInitOverwriteBehaviour:
             "testpart",   # partition (no sinfo)
             "8",          # cpus
             "12:00:00",   # time
-            "2G",         # mem
             "",           # mail (skip)
             "",           # account (skip)
             "",           # open_file_limit (default 8192)
@@ -211,7 +209,6 @@ class TestInitWarnings:
             "1",            # select partition
             "32",           # cpus (exceeds 8)
             "72:00:00",     # time
-            "4G",           # mem
             "",             # mail
             "",             # account
             "",             # open_file_limit (default 8192)
