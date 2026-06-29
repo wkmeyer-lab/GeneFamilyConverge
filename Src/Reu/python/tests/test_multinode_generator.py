@@ -445,11 +445,12 @@ class TestCrossCutting:
 
     def test_all_scripts_activate_conda(self, sample_config):
         for script in self._all_scripts(sample_config):
-            assert 'conda activate "/home/prm526/.conda/envs/convgeno"' in script
+            assert 'conda activate "$CONDA_ENV"' in script
 
-    def test_all_scripts_no_conda_info_base(self, sample_config):
+    def test_all_scripts_no_conda_info_base_as_primary(self, sample_config):
         for script in self._all_scripts(sample_config):
-            assert "conda info --base" not in script
+            primary_end = script.index("elif command -v conda")
+            assert "conda info --base" not in script[:primary_end]
 
     def test_all_scripts_have_export_all(self, sample_config):
         for script in self._all_scripts(sample_config):

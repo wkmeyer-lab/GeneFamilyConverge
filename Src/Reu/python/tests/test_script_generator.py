@@ -56,7 +56,7 @@ class TestGenerateOrthoFinderScript:
 
     def test_contains_conda_activation(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
-        assert 'conda activate "/home/prm526/.conda/envs/convgeno"' in script
+        assert 'conda activate "$CONDA_ENV"' in script
 
     def test_contains_orthofinder_command(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
@@ -138,9 +138,10 @@ class TestGenerateOrthoFinderScript:
         script = generate_orthofinder_script(sample_config)
         assert "#SBATCH --export=ALL" in script
 
-    def test_generated_script_no_conda_info_base(self, sample_config):
+    def test_generated_script_no_conda_info_base_as_primary(self, sample_config):
         script = generate_orthofinder_script(sample_config)
-        assert "conda info --base" not in script
+        primary_end = script.index("elif command -v conda")
+        assert "conda info --base" not in script[:primary_end]
 
     def test_contains_bootstrap_markers(self, sample_config):
         script = generate_orthofinder_script(sample_config)
@@ -149,10 +150,8 @@ class TestGenerateOrthoFinderScript:
 
     def test_sources_conda_sh_with_absolute_path(self, sample_config):
         script = generate_orthofinder_script(sample_config)
-        assert (
-            'source "/share/apps/miniforge3/24.3.0-0/etc/profile.d/conda.sh"'
-            in script
-        )
+        assert '[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]' in script
+        assert 'source "$CONDA_BASE/etc/profile.d/conda.sh"' in script
 
     def test_raises_without_runtime(self):
         config = PipelineConfig(
@@ -181,8 +180,8 @@ class TestGenerateOrthoFinderScript:
             ),
         )
         script = generate_orthofinder_script(config, alt_runtime)
-        assert 'source "/alt/conda/etc/profile.d/conda.sh"' in script
-        assert 'conda activate "/alt/envs/myenv"' in script
+        assert 'CONDA_BASE="/alt/conda"' in script
+        assert 'conda activate "$CONDA_ENV"' in script
 
 
 class TestWriteScript:

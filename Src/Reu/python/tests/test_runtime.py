@@ -42,31 +42,38 @@ def runtime_no_module() -> CondaRuntimeConfig:
 class TestRenderBootstrapContainsCondaSource:
     def test_uses_absolute_path_for_conda_sh(self, sample_runtime):
         output = render_conda_bootstrap(sample_runtime)
-        expected = 'source "/share/apps/miniforge3/24.3.0-0/etc/profile.d/conda.sh"'
-        assert expected in output
+        assert '[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]' in output
+        assert 'source "$CONDA_BASE/etc/profile.d/conda.sh"' in output
 
 
 class TestRenderBootstrapContainsActivatePrefix:
     def test_activates_by_absolute_prefix(self, sample_runtime):
         output = render_conda_bootstrap(sample_runtime)
-        expected = 'conda activate "/home/prm526/.conda/envs/convgeno"'
-        assert expected in output
+        assert 'conda activate "$CONDA_ENV"' in output
 
 
 class TestRenderBootstrapWithModule:
     def test_includes_module_load(self, sample_runtime):
         output = render_conda_bootstrap(sample_runtime)
-        assert "module load miniforge3/24.3.0-0" in output
+        assert 'module load "$CONDA_MODULE"' in output
 
-    def test_module_load_has_error_guard(self, sample_runtime):
+    def test_module_warns_on_failure(self, sample_runtime):
         output = render_conda_bootstrap(sample_runtime)
-        assert "2>/dev/null || true" in output
+        assert 'echo "WARNING: failed to load module: $CONDA_MODULE"' in output
+
+    def test_module_no_silent_swallow(self, sample_runtime):
+        output = render_conda_bootstrap(sample_runtime)
+        assert "2>/dev/null || true" not in output
 
 
 class TestRenderBootstrapWithoutModule:
     def test_no_module_load(self, runtime_no_module):
         output = render_conda_bootstrap(runtime_no_module)
         assert "module load" not in output
+
+    def test_conda_module_empty_when_unset(self, runtime_no_module):
+        output = render_conda_bootstrap(runtime_no_module)
+        assert 'CONDA_MODULE=""' in output
 
 
 class TestRenderBootstrapContainsDiagnostics:
@@ -102,13 +109,38 @@ class TestRenderBootstrapHasErrorChecks:
 
 
 class TestRenderBootstrapNoCondaInfoBase:
-    def test_no_conda_info_base_in_output(self, sample_runtime):
+    def test_conda_info_base_only_in_elif_fallback(self, sample_runtime):
         output = render_conda_bootstrap(sample_runtime)
-        assert "conda info --base" not in output
+        primary_end = output.index("elif command -v conda")
+        assert "conda info --base" not in output[:primary_end]
 
-    def test_no_conda_info_base_without_module(self, runtime_no_module):
+    def test_conda_info_base_in_elif_fallback(self, sample_runtime):
+        output = render_conda_bootstrap(sample_runtime)
+        assert "elif command -v conda >/dev/null 2>&1; then" in output
+        assert 'source "$(conda info --base)/etc/profile.d/conda.sh"' in output
+
+    def test_conda_info_base_only_in_elif_without_module(self, runtime_no_module):
         output = render_conda_bootstrap(runtime_no_module)
-        assert "conda info --base" not in output
+        primary_end = output.index("elif command -v conda")
+        assert "conda info --base" not in output[:primary_end]
+
+
+class TestRenderBootstrapGuards:
+    def test_guards_conda_base(self, sample_runtime):
+        output = render_conda_bootstrap(sample_runtime)
+        assert '[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]' in output
+
+    def test_has_conda_base_fallback(self, sample_runtime):
+        output = render_conda_bootstrap(sample_runtime)
+        assert "elif command -v conda >/dev/null 2>&1; then" in output
+
+    def test_uses_bash_variables(self, sample_runtime):
+        output = render_conda_bootstrap(sample_runtime)
+        assert 'CONDA_BASE="/share/apps/miniforge3/24.3.0-0"' in output
+        assert 'CONDA_ENV="/home/prm526/.conda/envs/convgeno"' in output
+        assert 'CONDA_MODULE="miniforge3/24.3.0-0"' in output
+        assert "$CONDA_BASE" in output
+        assert "$CONDA_ENV" in output
 
 
 class TestRenderBootstrapMarkers:

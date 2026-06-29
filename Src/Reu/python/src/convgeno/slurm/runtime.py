@@ -175,7 +175,7 @@ def render_conda_bootstrap(runtime: CondaRuntimeConfig) -> str:
     """
     conda_base_str = runtime.conda_base.as_posix()
     env_prefix_str = runtime.conda_env_prefix.as_posix()
-    conda_sh_str = f"{conda_base_str}/etc/profile.d/conda.sh"
+    conda_module_str = runtime.conda_module or ""
     env_name = runtime.conda_env_prefix.name
 
     lines: list[str] = []
@@ -186,42 +186,56 @@ def render_conda_bootstrap(runtime: CondaRuntimeConfig) -> str:
     lines.append('echo "  Hostname: $(hostname)"')
     lines.append('echo "  Job ID:   ${SLURM_JOB_ID:-none}"')
     lines.append("")
+    lines.append(f'CONDA_MODULE="{conda_module_str}"')
+    lines.append(f'CONDA_BASE="{conda_base_str}"')
+    lines.append(f'CONDA_ENV="{env_prefix_str}"')
+    lines.append("")
 
     if runtime.conda_module is not None:
-        lines.append("# Load the module system and conda module")
-        lines.append("if [ -f /etc/profile.d/modules.sh ]; then")
-        lines.append("    source /etc/profile.d/modules.sh 2>/dev/null || true")
+        lines.append("# Load conda module if configured")
+        lines.append('if [ -n "$CONDA_MODULE" ]; then')
+        lines.append("    if command -v module >/dev/null 2>&1; then")
+        lines.append('        module load "$CONDA_MODULE" || {')
+        lines.append(
+            '            echo "WARNING: failed to load module: $CONDA_MODULE" >&2'
+        )
+        lines.append("        }")
+        lines.append("    fi")
         lines.append("fi")
-        lines.append(f'module load {runtime.conda_module} 2>/dev/null || true')
         lines.append("")
 
     lines.append("# Source conda shell hook using absolute path")
-    lines.append(f'if [ ! -f "{conda_sh_str}" ]; then')
-    lines.append(f'    echo "ERROR: conda.sh not found at: {conda_sh_str}"')
-    lines.append('    echo "The conda installation may have moved. Re-run convgeno init."')
+    lines.append('if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then')
+    lines.append('    source "$CONDA_BASE/etc/profile.d/conda.sh"')
+    lines.append("elif command -v conda >/dev/null 2>&1; then")
+    lines.append('    source "$(conda info --base)/etc/profile.d/conda.sh"')
+    lines.append("else")
+    lines.append(
+        '    echo "ERROR: could not initialize conda. '
+        'Check runtime.conda_base in pipeline_config.yaml." >&2'
+    )
     lines.append("    exit 127")
     lines.append("fi")
-    lines.append(f'source "{conda_sh_str}"')
     lines.append("")
 
     lines.append("# Verify conda is now available")
     lines.append("if ! command -v conda &> /dev/null; then")
     lines.append('    echo "ERROR: conda command not available after sourcing conda.sh"')
-    lines.append(f'    echo "Check that the conda installation at {conda_base_str} is intact."')
+    lines.append('    echo "Check that the conda installation at $CONDA_BASE is intact."')
     lines.append("    exit 127")
     lines.append("fi")
     lines.append("")
 
     lines.append("# Activate environment by absolute prefix")
-    lines.append(f'conda activate "{env_prefix_str}"')
+    lines.append('conda activate "$CONDA_ENV"')
     lines.append("")
 
     lines.append("# Verify activation succeeded")
     lines.append(f'if [ "$CONDA_DEFAULT_ENV" != "{env_name}" ] && '
-                 f'[ "$CONDA_PREFIX" != "{env_prefix_str}" ]; then')
-    lines.append(f'    echo "ERROR: Failed to activate conda environment at {env_prefix_str}"')
-    lines.append(f'    echo "  CONDA_DEFAULT_ENV=$CONDA_DEFAULT_ENV"')
-    lines.append(f'    echo "  CONDA_PREFIX=$CONDA_PREFIX"')
+                 f'[ "$CONDA_PREFIX" != "$CONDA_ENV" ]; then')
+    lines.append('    echo "ERROR: Failed to activate conda environment at $CONDA_ENV"')
+    lines.append('    echo "  CONDA_DEFAULT_ENV=$CONDA_DEFAULT_ENV"')
+    lines.append('    echo "  CONDA_PREFIX=$CONDA_PREFIX"')
     lines.append("    exit 1")
     lines.append("fi")
     lines.append("")
