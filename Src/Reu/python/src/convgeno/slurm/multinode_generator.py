@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from convgeno.slurm.config import PipelineConfig, normalize_optional_account
+from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
 #
@@ -58,6 +59,7 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
         "--mem-per-cpu": config.slurm.mem_per_cpu,
         "--output": config.slurm.output_pattern,
         "--error": config.slurm.error_pattern,
+        "--export": "NONE",
     }
     account = normalize_optional_account(config.slurm.account)
     if account is not None:
@@ -103,7 +105,24 @@ def _validate_has_orthofinder(config: PipelineConfig) -> None:
         )
 
 
-def generate_prepare_script(config: PipelineConfig) -> str:
+def _resolve_runtime(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None,
+) -> CondaRuntimeConfig:
+    """Resolve runtime from explicit parameter or config, raising if absent."""
+    resolved = runtime if runtime is not None else config.runtime
+    if resolved is None:
+        raise ValueError(
+            "No runtime configuration provided. "
+            "Run 'convgeno init' to detect and store conda paths."
+        )
+    return resolved
+
+
+def generate_prepare_script(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
     """Generate SLURM script for OrthoFinder's prepare phase (``-op``).
 
     Runs on a single node. Captures the DIAMOND/BLAST commands to a file
@@ -111,6 +130,7 @@ def generate_prepare_script(config: PipelineConfig) -> str:
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None  # for type checker
+    resolved_runtime = _resolve_runtime(config, runtime)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = _build_sbatch_header(
@@ -123,6 +143,7 @@ def generate_prepare_script(config: PipelineConfig) -> str:
             "--time": "02:00:00",
         },
     )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
     script = f"""\
 #!/bin/bash
@@ -135,6 +156,8 @@ def generate_prepare_script(config: PipelineConfig) -> str:
 
 set -euo pipefail
 
+{bootstrap_block}
+
 echo "============================================================"
 echo "convgeno: OrthoFinder prepare phase started"
 echo "Job ID:    $SLURM_JOB_ID"
@@ -143,9 +166,6 @@ echo "Start:     $(date)"
 echo "============================================================"
 
 START_SECONDS=$SECONDS
-
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate {config.conda_env}
 
 INPUT_DIR="{config.orthofinder.input_dir}"
 OUTPUT_DIR="{config.orthofinder.output_dir}"
@@ -248,6 +268,7 @@ def generate_search_array_script(
     config: PipelineConfig,
     commands_per_task: int = 50,
     array_max: int | None = None,
+    runtime: CondaRuntimeConfig | None = None,
 ) -> str:
     """Generate SLURM array job that executes DIAMOND/BLAST search commands.
 
@@ -271,6 +292,9 @@ def generate_search_array_script(
         non-negative integer. The CLI computes this from the number of
         input FASTA files so the array size is deterministic and tied
         to validation.
+    runtime:
+        Conda runtime configuration. Falls back to ``config.runtime``
+        if ``None``.
 
     Raises
     ------
@@ -280,6 +304,7 @@ def generate_search_array_script(
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None
+    resolved_runtime = _resolve_runtime(config, runtime)
 
     if commands_per_task <= 0:
         raise ValueError("commands_per_task must be positive")
@@ -300,6 +325,7 @@ def generate_search_array_script(
             "--array": f"0-{array_max}",
         },
     )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
     script = f"""\
 #!/bin/bash
@@ -312,6 +338,8 @@ def generate_search_array_script(
 
 set -euo pipefail
 
+{bootstrap_block}
+
 echo "============================================================"
 echo "convgeno: OrthoFinder search array task $SLURM_ARRAY_TASK_ID"
 echo "Job ID:    $SLURM_JOB_ID (array job $SLURM_ARRAY_JOB_ID)"
@@ -320,9 +348,6 @@ echo "Start:     $(date)"
 echo "============================================================"
 
 START_SECONDS=$SECONDS
-
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate {config.conda_env}
 
 OUTPUT_DIR="{config.orthofinder.output_dir}"
 OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
@@ -394,7 +419,10 @@ exit 0
     return script
 
 
-def generate_resume_script(config: PipelineConfig) -> str:
+def generate_resume_script(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
     """Generate SLURM script for OrthoFinder's resume phase (``-b``).
 
     Runs on a single node after all search array tasks complete. Resumes
@@ -413,6 +441,7 @@ def generate_resume_script(config: PipelineConfig) -> str:
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None
+    resolved_runtime = _resolve_runtime(config, runtime)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = _build_sbatch_header(
@@ -425,6 +454,7 @@ def generate_resume_script(config: PipelineConfig) -> str:
             "--time": config.slurm.time_limit,
         },
     )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
     # Resolve analysis threads: explicit value or heuristic.
     if config.orthofinder.analysis_threads is not None:
@@ -469,6 +499,8 @@ echo "Open-file limit (current): $(ulimit -n || echo unknown)"
 
 set -euo pipefail
 
+{bootstrap_block}
+
 echo "============================================================"
 echo "convgeno: OrthoFinder resume phase started"
 echo "Job ID:    $SLURM_JOB_ID"
@@ -477,9 +509,6 @@ echo "Start:     $(date)"
 echo "============================================================"
 
 START_SECONDS=$SECONDS
-
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate {config.conda_env}
 
 # ---- Open-file limit ----
 {ulimit_block}

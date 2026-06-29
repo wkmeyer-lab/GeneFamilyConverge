@@ -6,18 +6,36 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig
+from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 
-def generate_orthofinder_script(config: PipelineConfig) -> str:
+def generate_orthofinder_script(
+    config: PipelineConfig,
+    runtime: CondaRuntimeConfig | None = None,
+) -> str:
     """Generate a SLURM batch script to run OrthoFinder.
 
-    Returns the complete script as a string ready to be written to
-    disk and submitted with ``sbatch``.
+    Parameters
+    ----------
+    config
+        Pipeline configuration containing SLURM resources and
+        OrthoFinder settings.
+    runtime
+        Conda runtime configuration for compute-node bootstrap.
+        If ``None``, falls back to ``config.runtime``. At least one
+        must be provided.
+
+    Returns
+    -------
+    str
+        Complete script ready to be written to disk and submitted
+        with ``sbatch``.
 
     Raises
     ------
     ValueError
-        If ``config.orthofinder`` is ``None``.
+        If ``config.orthofinder`` is ``None`` or no runtime config
+        is available.
     """
     if config.orthofinder is None:
         raise ValueError(
@@ -25,15 +43,24 @@ def generate_orthofinder_script(config: PipelineConfig) -> str:
             "Add an 'orthofinder' section to pipeline_config.yaml."
         )
 
+    resolved_runtime = runtime if runtime is not None else config.runtime
+    if resolved_runtime is None:
+        raise ValueError(
+            "No runtime configuration provided. "
+            "Run 'convgeno init' to detect and store conda paths."
+        )
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     sbatch_lines = config.slurm.to_sbatch_lines()
     sbatch_lines.insert(0, "#SBATCH --job-name=convgeno_orthofinder")
+    sbatch_lines.append("#SBATCH --export=NONE")
 
     of_args = config.orthofinder.to_command_args()
     of_command = "orthofinder " + " ".join(of_args)
 
     sbatch_block = "\n".join(sbatch_lines)
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
     script = f"""\
 #!/bin/bash
@@ -53,30 +80,20 @@ def generate_orthofinder_script(config: PipelineConfig) -> str:
 # ------------------------------------------------------------
 set -euo pipefail
 
-echo "============================================================"
-echo "convgeno: OrthoFinder job started"
-echo "Job ID:    $SLURM_JOB_ID"
-echo "Node:      $HOSTNAME"
-echo "Start:     $(date)"
-echo "============================================================"
+{bootstrap_block}
 
 # Record start time for duration calculation
 START_SECONDS=$SECONDS
 
-# Activate conda environment
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate {config.conda_env}
-
 # Verify OrthoFinder is available
 if ! command -v orthofinder &> /dev/null; then
-    echo "ERROR: orthofinder not found in conda environment '{config.conda_env}'"
+    echo "ERROR: orthofinder not found in conda environment"
     echo "Install with: conda install -c bioconda orthofinder"
     exit 1
 fi
 
 echo "OrthoFinder version:"
 orthofinder -h 2>&1 | head -n 2 || true
-echo "Using conda env: {config.conda_env}"
 echo ""
 
 # ------------------------------------------------------------

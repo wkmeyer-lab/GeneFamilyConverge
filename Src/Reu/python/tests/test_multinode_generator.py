@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -22,10 +23,20 @@ from convgeno.slurm.multinode_generator import (
     generate_resume_script,
     generate_search_array_script,
 )
+from convgeno.slurm.runtime import CondaRuntimeConfig
 
 
 @pytest.fixture()
-def sample_config() -> PipelineConfig:
+def sample_runtime() -> CondaRuntimeConfig:
+    return CondaRuntimeConfig(
+        conda_module="miniforge3/24.3.0-0",
+        conda_base=Path("/share/apps/miniforge3/24.3.0-0"),
+        conda_env_prefix=Path("/home/prm526/.conda/envs/convgeno"),
+    )
+
+
+@pytest.fixture()
+def sample_config(sample_runtime) -> PipelineConfig:
     return PipelineConfig(
         project_dir="/share/ceph/project",
         conda_env="convgeno",
@@ -41,6 +52,7 @@ def sample_config() -> PipelineConfig:
             search_threads=16,
             analysis_threads=8,
         ),
+        runtime=sample_runtime,
     )
 
 
@@ -433,7 +445,20 @@ class TestCrossCutting:
 
     def test_all_scripts_activate_conda(self, sample_config):
         for script in self._all_scripts(sample_config):
-            assert "conda activate convgeno" in script
+            assert 'conda activate "/home/prm526/.conda/envs/convgeno"' in script
+
+    def test_all_scripts_no_conda_info_base(self, sample_config):
+        for script in self._all_scripts(sample_config):
+            assert "conda info --base" not in script
+
+    def test_all_scripts_have_export_none(self, sample_config):
+        for script in self._all_scripts(sample_config):
+            assert "#SBATCH --export=NONE" in script
+
+    def test_all_scripts_have_bootstrap_markers(self, sample_config):
+        for script in self._all_scripts(sample_config):
+            assert "# ---- convgeno runtime bootstrap ----" in script
+            assert "# ---- end convgeno runtime bootstrap ----" in script
 
     @pytest.mark.skipif(
         shutil.which("bash") is None,
@@ -460,9 +485,11 @@ class TestCrossCutting:
                 f"{result.stderr}\n---script---\n{script}"
             )
 
-    def test_raises_without_orthofinder_config(self):
+    def test_raises_without_orthofinder_config(self, sample_runtime):
         config = PipelineConfig(
-            project_dir="/project", slurm=SlurmConfig(partition="hawkcpu")
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            runtime=sample_runtime,
         )
         # The orthofinder-missing check fires before array_max validation
         # in generate_search_array_script, so all three raise the same
@@ -479,7 +506,7 @@ class TestCrossCutting:
 
 class TestAccountOmissionInMultinodeScripts:
     @pytest.fixture()
-    def no_account_config(self) -> PipelineConfig:
+    def no_account_config(self, sample_runtime) -> PipelineConfig:
         return PipelineConfig(
             project_dir="/share/ceph/project",
             conda_env="convgeno",
@@ -495,6 +522,7 @@ class TestAccountOmissionInMultinodeScripts:
                 search_threads=16,
                 analysis_threads=8,
             ),
+            runtime=sample_runtime,
         )
 
     def test_multinode_scripts_omit_null_account(self, no_account_config):
@@ -514,7 +542,7 @@ class TestAccountOmissionInMultinodeScripts:
 
     @pytest.mark.parametrize("account", ["", "null", "None", "NULL"])
     def test_multinode_scripts_omit_stringy_null_accounts(
-        self, account, no_account_config
+        self, account, no_account_config, sample_runtime
     ):
         config = PipelineConfig(
             project_dir=no_account_config.project_dir,
@@ -526,6 +554,7 @@ class TestAccountOmissionInMultinodeScripts:
                 account=account,
             ),
             orthofinder=no_account_config.orthofinder,
+            runtime=sample_runtime,
         )
         prepare = generate_prepare_script(config)
         search = _search_script(config)
@@ -559,7 +588,7 @@ class TestChooseAnalysisThreads:
 
 class TestResumeScriptUlimitAndTmpdir:
     @pytest.fixture()
-    def config_with_limit(self) -> PipelineConfig:
+    def config_with_limit(self, sample_runtime) -> PipelineConfig:
         return PipelineConfig(
             project_dir="/share/ceph/project",
             conda_env="convgeno",
@@ -575,10 +604,11 @@ class TestResumeScriptUlimitAndTmpdir:
                 search_threads=16,
                 analysis_threads=None,
             ),
+            runtime=sample_runtime,
         )
 
     @pytest.fixture()
-    def config_no_limit(self) -> PipelineConfig:
+    def config_no_limit(self, sample_runtime) -> PipelineConfig:
         return PipelineConfig(
             project_dir="/share/ceph/project",
             conda_env="convgeno",
@@ -594,6 +624,7 @@ class TestResumeScriptUlimitAndTmpdir:
                 search_threads=16,
                 analysis_threads=None,
             ),
+            runtime=sample_runtime,
         )
 
     def test_resume_contains_ulimit_n(self, config_with_limit):
@@ -640,7 +671,7 @@ class TestResumeScriptUlimitAndTmpdir:
         script = generate_resume_script(config_no_limit)
         assert "ANALYSIS_THREADS=2" in script
 
-    def test_explicit_analysis_threads_override(self):
+    def test_explicit_analysis_threads_override(self, sample_runtime):
         config = PipelineConfig(
             project_dir="/share/ceph/project",
             conda_env="convgeno",
@@ -655,6 +686,7 @@ class TestResumeScriptUlimitAndTmpdir:
                 search_threads=16,
                 analysis_threads=6,
             ),
+            runtime=sample_runtime,
         )
         script = generate_resume_script(config)
         assert "ANALYSIS_THREADS=6" in script

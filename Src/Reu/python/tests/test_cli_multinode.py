@@ -18,6 +18,14 @@ from convgeno.cli.orthofinder_cmd import (
 )
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig
+from convgeno.slurm.runtime import CondaRuntimeConfig
+
+
+_TEST_RUNTIME = CondaRuntimeConfig(
+    conda_module="miniforge3/24.3.0-0",
+    conda_base=Path("/share/apps/miniforge3/24.3.0-0"),
+    conda_env_prefix=Path("/home/user/.conda/envs/convgeno"),
+)
 
 
 @pytest.fixture()
@@ -35,6 +43,7 @@ def sample_config_file(tmp_path: Path) -> dict:
             input_dir=str(proteomes),
             output_dir=str(tmp_path / "results"),
         ),
+        runtime=_TEST_RUNTIME,
     )
     config_path = tmp_path / "config.yaml"
     config.save(config_path)

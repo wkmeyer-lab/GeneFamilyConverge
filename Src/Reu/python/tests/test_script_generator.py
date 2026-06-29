@@ -6,17 +6,28 @@ Run with:  pytest tests/test_script_generator.py -v
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig
+from convgeno.slurm.runtime import CondaRuntimeConfig
 from convgeno.slurm.script_generator import generate_orthofinder_script, write_script
 
 
 @pytest.fixture()
-def sample_config() -> PipelineConfig:
+def sample_runtime() -> CondaRuntimeConfig:
+    return CondaRuntimeConfig(
+        conda_module="miniforge3/24.3.0-0",
+        conda_base=Path("/share/apps/miniforge3/24.3.0-0"),
+        conda_env_prefix=Path("/home/prm526/.conda/envs/convgeno"),
+    )
+
+
+@pytest.fixture()
+def sample_config(sample_runtime) -> PipelineConfig:
     return PipelineConfig(
         project_dir="/share/ceph/project",
         conda_env="convgeno",
@@ -27,6 +38,7 @@ def sample_config() -> PipelineConfig:
             input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
             output_dir="/share/ceph/project/Data/processed/orthofinder",
         ),
+        runtime=sample_runtime,
     )
 
 
@@ -44,7 +56,7 @@ class TestGenerateOrthoFinderScript:
 
     def test_contains_conda_activation(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
-        assert "conda activate convgeno" in script
+        assert 'conda activate "/home/prm526/.conda/envs/convgeno"' in script
 
     def test_contains_orthofinder_command(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
@@ -99,14 +111,16 @@ class TestGenerateOrthoFinderScript:
         script = generate_orthofinder_script(sample_config)
         assert "set -euo pipefail" in script
 
-    def test_raises_without_orthofinder_config(self):
+    def test_raises_without_orthofinder_config(self, sample_runtime):
         config = PipelineConfig(
-            project_dir="/project", slurm=SlurmConfig(partition="hawkcpu")
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            runtime=sample_runtime,
         )
         with pytest.raises(ValueError, match="OrthoFinder"):
             generate_orthofinder_script(config)
 
-    def test_with_extra_orthofinder_args(self):
+    def test_with_extra_orthofinder_args(self, sample_runtime):
         config = PipelineConfig(
             project_dir="/project",
             slurm=SlurmConfig(partition="hawkcpu"),
@@ -115,9 +129,60 @@ class TestGenerateOrthoFinderScript:
                 output_dir="/out",
                 extra_args=["--fewer-files"],
             ),
+            runtime=sample_runtime,
         )
         script = generate_orthofinder_script(config)
         assert "--fewer-files" in script
+
+    def test_generated_script_contains_export_none(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert "#SBATCH --export=NONE" in script
+
+    def test_generated_script_no_conda_info_base(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert "conda info --base" not in script
+
+    def test_contains_bootstrap_markers(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert "# ---- convgeno runtime bootstrap ----" in script
+        assert "# ---- end convgeno runtime bootstrap ----" in script
+
+    def test_sources_conda_sh_with_absolute_path(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert (
+            'source "/share/apps/miniforge3/24.3.0-0/etc/profile.d/conda.sh"'
+            in script
+        )
+
+    def test_raises_without_runtime(self):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=None,
+        )
+        with pytest.raises(ValueError, match="runtime"):
+            generate_orthofinder_script(config)
+
+    def test_explicit_runtime_overrides_config(self):
+        alt_runtime = CondaRuntimeConfig(
+            conda_module=None,
+            conda_base=Path("/alt/conda"),
+            conda_env_prefix=Path("/alt/envs/myenv"),
+        )
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=CondaRuntimeConfig(
+                conda_module="old/1.0",
+                conda_base=Path("/old/conda"),
+                conda_env_prefix=Path("/old/envs/convgeno"),
+            ),
+        )
+        script = generate_orthofinder_script(config, alt_runtime)
+        assert 'source "/alt/conda/etc/profile.d/conda.sh"' in script
+        assert 'conda activate "/alt/envs/myenv"' in script
 
 
 class TestWriteScript:
@@ -127,6 +192,10 @@ class TestWriteScript:
         assert script_path.exists()
         assert script_path.read_text(encoding="utf-8") == "#!/bin/bash\necho hello"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows does not support Unix file permission bits",
+    )
     def test_is_executable(self, tmp_path: Path):
         script_path = tmp_path / "job.sh"
         write_script("#!/bin/bash\necho test", script_path)

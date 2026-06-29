@@ -228,6 +228,13 @@ def run_generate(config_path: str, script_path: str) -> Path:
     """
     config = PipelineConfig.load(config_path)
 
+    if config.runtime is None:
+        print(
+            "ERROR: No runtime configuration found in config file.\n"
+            "Run 'convgeno init' to detect and store conda paths."
+        )
+        sys.exit(1)
+
     if config.orthofinder is not None:
         validation = validate_orthofinder_inputs(config.orthofinder.input_dir)
         print(validation.summary())
@@ -241,7 +248,7 @@ def run_generate(config_path: str, script_path: str) -> Path:
             print(f"ERROR: {exc}")
             sys.exit(1)
 
-    content = generate_orthofinder_script(config)
+    content = generate_orthofinder_script(config, config.runtime)
     path = write_script(content, script_path)
     print(f"SLURM script written to: {path}")
     return path
@@ -291,6 +298,13 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
     """
     config = PipelineConfig.load(config_path)
 
+    if config.runtime is None:
+        print(
+            "ERROR: No runtime configuration found in config file.\n"
+            "Run 'convgeno init' to detect and store conda paths."
+        )
+        sys.exit(1)
+
     commands_per_task = 50
     # Defensive default that yields a 1-task array. Only used if
     # orthofinder is missing from config — generate_search_array_script
@@ -322,13 +336,14 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
         print(f"Commands per array task: {commands_per_task}")
         print(f"Generated SLURM array range: 0-{array_max}")
 
-    prepare_content = generate_prepare_script(config)
+    prepare_content = generate_prepare_script(config, config.runtime)
     search_content = generate_search_array_script(
         config,
         commands_per_task=commands_per_task,
         array_max=array_max,
+        runtime=config.runtime,
     )
-    resume_content = generate_resume_script(config)
+    resume_content = generate_resume_script(config, config.runtime)
 
     script_dir_path = Path(script_dir)
     prepare_path = write_script(prepare_content, script_dir_path / "orthofinder_prepare.sh")

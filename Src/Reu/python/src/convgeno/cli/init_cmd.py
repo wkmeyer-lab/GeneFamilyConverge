@@ -6,6 +6,11 @@ from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
 from convgeno.slurm.discovery import discover_partitions
+from convgeno.slurm.runtime import (
+    CondaRuntimeConfig,
+    detect_conda_runtime,
+    runtime_config_to_dict,
+)
 
 
 def _prompt(message: str, default: str | None = None) -> str:
@@ -161,10 +166,49 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         account=account,
         open_file_limit=open_file_limit,
     )
+
+    # ---- Detect conda runtime configuration ----
+    print("\n=== Detecting conda runtime ===\n")
+    try:
+        detected_runtime = detect_conda_runtime()
+    except RuntimeError as e:
+        print(f"WARNING: Could not detect conda runtime: {e}")
+        print("You can configure runtime paths manually in the generated config file.")
+        detected_runtime = None
+
+    runtime_config: CondaRuntimeConfig | None = None
+    if detected_runtime is not None:
+        print("Detected conda runtime:")
+        print(f"  Module: {detected_runtime.conda_module or '(none)'}")
+        print(f"  Conda base: {detected_runtime.conda_base}")
+        print(f"  Environment: {detected_runtime.conda_env_prefix}")
+        print("")
+        use_detected = _prompt("Use these settings? [Y/n]", default="Y")
+        if use_detected.lower().startswith("n"):
+            conda_module_str = _prompt_optional(
+                "Conda module name (e.g. miniforge3/24.3.0-0)"
+            )
+            conda_base_str = _prompt(
+                "Absolute path to conda installation",
+                default=str(detected_runtime.conda_base),
+            )
+            conda_env_str = _prompt(
+                "Absolute path to conda environment",
+                default=str(detected_runtime.conda_env_prefix),
+            )
+            runtime_config = CondaRuntimeConfig(
+                conda_module=conda_module_str,
+                conda_base=Path(conda_base_str),
+                conda_env_prefix=Path(conda_env_str),
+            )
+        else:
+            runtime_config = detected_runtime
+
     config = PipelineConfig(
         project_dir=project_dir,
         conda_env=conda_env,
         slurm=slurm,
+        runtime=runtime_config,
     )
 
     config.save(path)
@@ -181,3 +225,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
     print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")
+    if runtime_config is not None:
+        print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
+        print(f"  Conda base:         {runtime_config.conda_base}")
+        print(f"  Conda env prefix:   {runtime_config.conda_env_prefix}")

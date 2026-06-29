@@ -10,6 +10,11 @@ from typing import Optional
 import yaml
 
 from convgeno.external.config import OrthoFinderConfig
+from convgeno.slurm.runtime import (
+    CondaRuntimeConfig,
+    runtime_config_from_dict,
+    runtime_config_to_dict,
+)
 
 
 def normalize_optional_account(account: str | None) -> str | None:
@@ -116,6 +121,7 @@ class PipelineConfig:
     conda_env: str = "convgeno"
     slurm: SlurmConfig = field(default_factory=lambda: SlurmConfig(partition=""))
     orthofinder: Optional[OrthoFinderConfig] = None
+    runtime: Optional[CondaRuntimeConfig] = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
@@ -128,6 +134,8 @@ class PipelineConfig:
         }
         if self.orthofinder is not None:
             data["orthofinder"] = self.orthofinder.to_dict()
+        if self.runtime is not None:
+            data.update(runtime_config_to_dict(self.runtime))
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -155,9 +163,14 @@ class PipelineConfig:
         slurm_config = SlurmConfig.from_dict(slurm_dict)
         of_dict = data.get("orthofinder")
         of_config = OrthoFinderConfig.from_dict(of_dict) if of_dict else None
+        runtime_dict = data.get("runtime")
+        runtime_config = (
+            runtime_config_from_dict(runtime_dict) if runtime_dict else None
+        )
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
             slurm=slurm_config,
             orthofinder=of_config,
+            runtime=runtime_config,
         )
