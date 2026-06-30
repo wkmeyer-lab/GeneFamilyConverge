@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -42,7 +41,8 @@ class SlurmConfig:
     nodes: int = 1
     ntasks: int = 1
     cpus_per_task: int = 16
-    mem: str = "0"
+    mem: str | None = None
+    mem_per_cpu: str | None = None
     account: Optional[str] = None
     mail_user: Optional[str] = None
     mail_type: str = "END,FAIL"
@@ -53,10 +53,15 @@ class SlurmConfig:
     is_ephemeral_scratch: bool = False  # True when scratch is node-local.
     extra_sbatch_args: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Validate mutually exclusive SLURM memory request fields."""
+        if self.mem is not None and self.mem_per_cpu is not None:
+            raise ValueError("SlurmConfig cannot set both 'mem' and 'mem_per_cpu'.")
+
     def to_dict(self) -> dict:
         """Serialize to a dict, omitting fields whose value is ``None``."""
         # ## NEW: Keep scratch fields visible in YAML as run-time documentation.
-        always_include = {"scratch_dir", "is_ephemeral_scratch"}
+        always_include = {"mem", "mem_per_cpu", "scratch_dir", "is_ephemeral_scratch"}
         return {
             k: v
             for k, v in dataclasses.asdict(self).items()
@@ -82,13 +87,6 @@ class SlurmConfig:
             )
         valid_fields = {f.name for f in dataclasses.fields(cls)}
         extra_sbatch_args = data.pop("extra_sbatch_args", [])
-        if "mem_per_cpu" in data and "mem" not in data:
-            print(
-                "Warning: 'mem_per_cpu' in config is deprecated. "
-                "Using --mem=0 (all node memory) instead. "
-                "Re-run 'convgeno init' to update your config.",
-                file=sys.stderr,
-            )
         filtered = {k: v for k, v in data.items() if k in valid_fields}
         if "account" in filtered:
             filtered["account"] = normalize_optional_account(filtered["account"])
@@ -109,6 +107,7 @@ class SlurmConfig:
             "ntasks": "--ntasks",
             "cpus_per_task": "--cpus-per-task",
             "mem": "--mem",
+            "mem_per_cpu": "--mem-per-cpu",
             "mail_user": "--mail-user",
             "mail_type": "--mail-type",
             "output_pattern": "--output",

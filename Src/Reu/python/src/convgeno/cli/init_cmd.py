@@ -9,8 +9,10 @@ from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
 from convgeno.slurm.discovery import (
     detect_node_cpus,
+    detect_partition_memory,
     detect_scratch_dir,
     discover_partitions,
+    recommend_memory_mb,
 )
 from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
@@ -109,6 +111,26 @@ def _default_orthofinder_output_dir(
     )
 
 
+def _format_detected_memory(value: int | None) -> str:
+    return f"{value} MB" if value is not None else "unavailable"
+
+
+def _memory_recommendation_basis(
+    cpus_per_task: int,
+    memory_detection: dict[str, int | None],
+) -> str:
+    max_mem_per_cpu = memory_detection["max_mem_per_cpu_mb"]
+    def_mem_per_cpu = memory_detection["def_mem_per_cpu_mb"]
+    min_node_memory = memory_detection["min_node_memory_mb"]
+    if max_mem_per_cpu is not None and max_mem_per_cpu > 0:
+        return f"MaxMemPerCPU={max_mem_per_cpu} MB x cpus_per_task={cpus_per_task}"
+    if def_mem_per_cpu is not None and def_mem_per_cpu > 0:
+        return f"DefMemPerCPU={def_mem_per_cpu} MB x cpus_per_task={cpus_per_task}"
+    if min_node_memory is not None and min_node_memory > 0:
+        return f"90% of minimum node memory ({min_node_memory} MB)"
+    return "user-provided explicit memory request"
+
+
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
     """Run the interactive init wizard to create pipeline_config.yaml."""
     path = Path(output_path)
@@ -172,6 +194,42 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     )
 
     cpus_per_task = _prompt_int("CPUs per task", default=recommended_cpus)
+    memory_detection = detect_partition_memory(partition_name)
+    print("Detected partition memory limits:")
+    print(
+        "  MaxMemPerCPU: "
+        f"{_format_detected_memory(memory_detection['max_mem_per_cpu_mb'])}"
+    )
+    print(
+        "  DefMemPerCPU: "
+        f"{_format_detected_memory(memory_detection['def_mem_per_cpu_mb'])}"
+    )
+    print(
+        "  Minimum node memory: "
+        f"{_format_detected_memory(memory_detection['min_node_memory_mb'])}"
+    )
+    memory_basis = _memory_recommendation_basis(cpus_per_task, memory_detection)
+    try:
+        recommended_memory_mb = recommend_memory_mb(
+            cpus_per_task=cpus_per_task,
+            max_mem_per_cpu_mb=memory_detection["max_mem_per_cpu_mb"],
+            def_mem_per_cpu_mb=memory_detection["def_mem_per_cpu_mb"],
+            min_node_memory_mb=memory_detection["min_node_memory_mb"],
+        )
+        recommended_memory = f"{recommended_memory_mb}M"
+        print(f"Recommended memory request: {recommended_memory}")
+        print(f"Reason: {memory_basis}")
+        memory_request = _prompt("Memory request", default=recommended_memory)
+        if memory_request != recommended_memory:
+            memory_basis = "user-provided explicit memory request"
+    except ValueError:
+        print(
+            "Could not detect partition memory limits. Please enter an "
+            "explicit SLURM memory request."
+        )
+        memory_request = _prompt("Memory request (e.g. 350400M)")
+        memory_basis = "user-provided explicit memory request"
+
     search_threads, analysis_threads = _derive_orthofinder_threads(cpus_per_task)
     print(
         f"OrthoFinder threads: -t {search_threads} (sequence search), "
@@ -235,7 +293,6 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             "Expected HH:MM:SS or D-HH:MM:SS."
         )
 
-    print("Memory: requesting all available node memory (--mem=0)")
     mail_user = _prompt_optional("Email for SLURM job notifications")
     account = normalize_optional_account(
         _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
@@ -257,7 +314,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         partition=partition_name,
         time_limit=time_limit,
         cpus_per_task=cpus_per_task,
-        mem="0",
+        mem=memory_request,
+        mem_per_cpu=None,
         mail_user=mail_user,
         account=account,
         open_file_limit=open_file_limit,
@@ -327,7 +385,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  SLURM partition:    {partition_name}")
     print(f"  CPUs per task:      {cpus_per_task}")
     print(f"  Time limit:         {time_limit}")
-    print("  Memory:             --mem=0 (all available node memory)")
+    print(f"  Memory:             {memory_request}")
+    print(f"  Memory basis:       {memory_basis}")
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")

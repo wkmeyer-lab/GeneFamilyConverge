@@ -13,9 +13,11 @@ import pytest
 from convgeno.slurm.discovery import (
     PartitionInfo,
     _parse_sinfo_line,
+    detect_partition_memory,
     detect_node_cpus,
     detect_scratch_dir,
     discover_partitions,
+    recommend_memory_mb,
 )
 
 
@@ -183,6 +185,54 @@ class TestDetectNodeCpus:
         assert detected["threads_per_core"] == 1
         assert detected["physical_cores"] == 52
         assert detected["recommended_physical"] == 48
+
+
+class TestDetectPartitionMemory:
+    def test_detects_partition_and_min_node_memory(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(
+                    returncode=0,
+                    stdout=(
+                        "PartitionName=hawkcpu MaxMemPerCPU=7300 "
+                        "DefMemPerCPU=UNLIMITED MaxMemPerNode=UNLIMITED "
+                        "DefMemPerNode=0"
+                    ),
+                ),
+                Mock(returncode=0, stdout="hawk-a001 380000\nhawk-a002 384000\n"),
+            ],
+        ):
+            detected = detect_partition_memory("hawkcpu")
+
+        assert detected["max_mem_per_cpu_mb"] == 7300
+        assert detected["def_mem_per_cpu_mb"] is None
+        assert detected["max_mem_per_node_mb"] is None
+        assert detected["def_mem_per_node_mb"] is None
+        assert detected["min_node_memory_mb"] == 380000
+
+    @patch("convgeno.slurm.discovery.subprocess.run", side_effect=FileNotFoundError)
+    def test_detect_partition_memory_fails_gracefully(self, mock_run):
+        detected = detect_partition_memory("missing")
+
+        assert detected["max_mem_per_cpu_mb"] is None
+        assert detected["def_mem_per_cpu_mb"] is None
+        assert detected["min_node_memory_mb"] is None
+
+
+class TestRecommendMemoryMb:
+    def test_uses_max_mem_per_cpu_first(self):
+        assert recommend_memory_mb(48, 7300, 6000, 380000) == 350400
+
+    def test_falls_back_to_def_mem_per_cpu(self):
+        assert recommend_memory_mb(32, None, 5000, 380000) == 160000
+
+    def test_falls_back_to_90_percent_min_node_memory(self):
+        assert recommend_memory_mb(16, None, None, 380000) == 342000
+
+    def test_raises_when_nothing_available(self):
+        with pytest.raises(ValueError, match="Could not detect partition memory"):
+            recommend_memory_mb(16, None, None, None)
 
 
 class TestDetectScratchDir:

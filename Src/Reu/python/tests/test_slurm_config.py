@@ -23,7 +23,8 @@ class TestSlurmConfigFromDict:
         assert cfg.time_limit == "24:00:00"
         assert cfg.nodes == 1
         assert cfg.ntasks == 1
-        assert cfg.mem == "0"
+        assert cfg.mem is None
+        assert cfg.mem_per_cpu is None
         assert cfg.account is None
         assert cfg.mail_user is None
         assert cfg.mail_type == "END,FAIL"
@@ -48,7 +49,8 @@ class TestToSbatchLines:
         assert "#SBATCH --partition=hawkcpu" in lines
         assert "#SBATCH --time=72:00:00" in lines
         assert "#SBATCH --cpus-per-task=16" in lines
-        assert "#SBATCH --mem=0" in lines
+        assert not any("--mem=" in line for line in lines)
+        assert not any("--mem-per-cpu" in line for line in lines)
         assert "#SBATCH --nodes=1" in lines
         assert not any("--account" in line for line in lines)
         assert not any("--mail-user" in line for line in lines)
@@ -72,15 +74,32 @@ class TestToSbatchLines:
         assert "#SBATCH --account=wym219" in lines
         assert "#SBATCH --mail-user=abc@lehigh.edu" in lines
 
-    def test_mem_default_is_zero(self):
+    def test_mem_default_is_unset(self):
         cfg = SlurmConfig(partition="hawkcpu")
 
-        assert "#SBATCH --mem=0" in cfg.to_sbatch_lines()
+        assert not any("--mem=" in line for line in cfg.to_sbatch_lines())
 
     def test_mem_custom_value(self):
-        cfg = SlurmConfig(partition="hawkcpu", mem="360G")
+        cfg = SlurmConfig(partition="hawkcpu", mem="350400M")
 
-        assert "#SBATCH --mem=360G" in cfg.to_sbatch_lines()
+        assert "#SBATCH --mem=350400M" in cfg.to_sbatch_lines()
+
+    def test_mem_per_cpu_not_emitted_when_mem_is_set(self):
+        cfg = SlurmConfig(partition="hawkcpu", mem="350400M")
+
+        lines = cfg.to_sbatch_lines()
+
+        assert "#SBATCH --mem=350400M" in lines
+        assert not any("--mem-per-cpu" in line for line in lines)
+
+    def test_mem_per_cpu_emitted_when_mem_is_unset(self):
+        cfg = SlurmConfig(partition="hawkcpu", mem_per_cpu="4G")
+
+        assert "#SBATCH --mem-per-cpu=4G" in cfg.to_sbatch_lines()
+
+    def test_rejects_mem_and_mem_per_cpu_together(self):
+        with pytest.raises(ValueError, match="mem.*mem_per_cpu"):
+            SlurmConfig(partition="hawkcpu", mem="350400M", mem_per_cpu="4G")
 
 
 class TestPipelineConfigRoundtrip:
@@ -101,19 +120,25 @@ class TestPipelineConfigRoundtrip:
         assert loaded.slurm.time_limit == "72:00:00"
         assert loaded.slurm.nodes == 1
 
-    def test_from_dict_backward_compat_mem_per_cpu(self, capsys):
+    def test_from_dict_backward_compat_mem_per_cpu(self):
         cfg = SlurmConfig.from_dict(
             {"partition": "hawkcpu", "mem_per_cpu": "4G"}
         )
 
-        captured = capsys.readouterr()
-        assert cfg.mem == "0"
-        assert "'mem_per_cpu' in config is deprecated" in captured.err
+        assert cfg.mem is None
+        assert cfg.mem_per_cpu == "4G"
 
     def test_from_dict_with_mem_key(self):
-        cfg = SlurmConfig.from_dict({"partition": "hawkcpu", "mem": "360G"})
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu", "mem": "350400M"})
 
-        assert cfg.mem == "360G"
+        assert cfg.mem == "350400M"
+        assert cfg.mem_per_cpu is None
+
+    def test_from_dict_rejects_mem_and_mem_per_cpu(self):
+        with pytest.raises(ValueError, match="mem.*mem_per_cpu"):
+            SlurmConfig.from_dict(
+                {"partition": "hawkcpu", "mem": "350400M", "mem_per_cpu": "4G"}
+            )
 
     def test_load_missing_file(self):
         with pytest.raises(FileNotFoundError):

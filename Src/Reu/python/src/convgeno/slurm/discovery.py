@@ -176,6 +176,106 @@ def detect_node_cpus(partition: str) -> dict[str, int]:
     }
 
 
+def _parse_slurm_memory_mb(value: str) -> int | None:
+    raw = value.strip().rstrip("+")
+    if raw.isdigit():
+        parsed = int(raw)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _parse_scontrol_memory_field(text: str, field: str) -> int | None:
+    match = re.search(rf"\b{field}=([^\s]+)", text)
+    if match is None:
+        return None
+    return _parse_slurm_memory_mb(match.group(1))
+
+
+def detect_partition_memory(partition: str) -> dict[str, int | None]:
+    """Detect memory limits and node memory for a SLURM partition.
+
+    Returns ``None`` values when SLURM commands are unavailable or a field
+    is absent. The function never raises, so ``convgeno init`` can fall back
+    to an explicit user prompt.
+    """
+    detected: dict[str, int | None] = {
+        "max_mem_per_cpu_mb": None,
+        "def_mem_per_cpu_mb": None,
+        "max_mem_per_node_mb": None,
+        "def_mem_per_node_mb": None,
+        "min_node_memory_mb": None,
+    }
+
+    try:
+        partition_result = subprocess.run(
+            ["scontrol", "show", "partition", partition],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if partition_result.returncode == 0:
+            text = partition_result.stdout
+            detected["max_mem_per_cpu_mb"] = _parse_scontrol_memory_field(
+                text, "MaxMemPerCPU"
+            )
+            detected["def_mem_per_cpu_mb"] = _parse_scontrol_memory_field(
+                text, "DefMemPerCPU"
+            )
+            detected["max_mem_per_node_mb"] = _parse_scontrol_memory_field(
+                text, "MaxMemPerNode"
+            )
+            detected["def_mem_per_node_mb"] = _parse_scontrol_memory_field(
+                text, "DefMemPerNode"
+            )
+    except Exception:
+        pass
+
+    try:
+        node_result = subprocess.run(
+            ["sinfo", "-N", "-h", "-p", partition, "-o", "%N %m"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if node_result.returncode == 0:
+            node_memory: list[int] = []
+            for line in node_result.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                memory_mb = _parse_slurm_memory_mb(parts[1])
+                if memory_mb is not None:
+                    node_memory.append(memory_mb)
+            if node_memory:
+                detected["min_node_memory_mb"] = min(node_memory)
+    except Exception:
+        pass
+
+    return detected
+
+
+def recommend_memory_mb(
+    cpus_per_task: int,
+    max_mem_per_cpu_mb: int | None,
+    def_mem_per_cpu_mb: int | None,
+    min_node_memory_mb: int | None,
+) -> int:
+    """Recommend an explicit total SLURM memory request in megabytes."""
+    if max_mem_per_cpu_mb is not None and max_mem_per_cpu_mb > 0:
+        return cpus_per_task * max_mem_per_cpu_mb
+
+    if def_mem_per_cpu_mb is not None and def_mem_per_cpu_mb > 0:
+        return cpus_per_task * def_mem_per_cpu_mb
+
+    if min_node_memory_mb is not None and min_node_memory_mb > 0:
+        return int(min_node_memory_mb * 0.90)
+
+    raise ValueError(
+        "Could not detect partition memory limits. Ask the user for an "
+        "explicit SLURM memory request."
+    )
+
+
 def _empty_scratch_detection() -> dict[str, str | bool | None]:
     return {"scratch_base": None, "is_ephemeral": False, "method": "none"}
 

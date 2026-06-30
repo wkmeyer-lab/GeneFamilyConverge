@@ -32,7 +32,10 @@ def sample_config(sample_runtime) -> PipelineConfig:
         project_dir="/share/ceph/project",
         conda_env="convgeno",
         slurm=SlurmConfig(
-            partition="hawkcpu", cpus_per_task=16, time_limit="72:00:00"
+            partition="hawkcpu",
+            cpus_per_task=16,
+            time_limit="72:00:00",
+            mem="350400M",
         ),
         orthofinder=OrthoFinderConfig(
             input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
@@ -52,8 +55,32 @@ class TestGenerateOrthoFinderScript:
         assert "#SBATCH --partition=hawkcpu" in script
         assert "#SBATCH --time=72:00:00" in script
         assert "#SBATCH --cpus-per-task=16" in script
-        assert "#SBATCH --mem=0" in script
+        assert "#SBATCH --mem=350400M" in script
         assert "#SBATCH --job-name=convgeno_orthofinder" in script
+
+    def test_does_not_emit_mem_zero_unless_explicit(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "#SBATCH --mem=0" not in script
+
+    def test_explicit_mem_zero_is_preserved(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu", mem="0"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "#SBATCH --mem=0" in script
 
     def test_contains_conda_activation(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
