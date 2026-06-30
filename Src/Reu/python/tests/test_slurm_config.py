@@ -23,7 +23,8 @@ class TestSlurmConfigFromDict:
         assert cfg.time_limit == "24:00:00"
         assert cfg.nodes == 1
         assert cfg.ntasks == 1
-        assert cfg.mem_per_cpu == "4G"
+        assert cfg.mem is None
+        assert cfg.mem_per_cpu is None
         assert cfg.account is None
         assert cfg.mail_user is None
         assert cfg.mail_type == "END,FAIL"
@@ -46,8 +47,10 @@ class TestToSbatchLines:
         lines = cfg.to_sbatch_lines()
         assert isinstance(lines, list)
         assert "#SBATCH --partition=hawkcpu" in lines
-        assert "#SBATCH --time=48:00:00" in lines
+        assert "#SBATCH --time=72:00:00" in lines
         assert "#SBATCH --cpus-per-task=16" in lines
+        assert not any("--mem=" in line for line in lines)
+        assert not any("--mem-per-cpu" in line for line in lines)
         assert "#SBATCH --nodes=1" in lines
         assert not any("--account" in line for line in lines)
         assert not any("--mail-user" in line for line in lines)
@@ -71,6 +74,33 @@ class TestToSbatchLines:
         assert "#SBATCH --account=wym219" in lines
         assert "#SBATCH --mail-user=abc@lehigh.edu" in lines
 
+    def test_mem_default_is_unset(self):
+        cfg = SlurmConfig(partition="hawkcpu")
+
+        assert not any("--mem=" in line for line in cfg.to_sbatch_lines())
+
+    def test_mem_custom_value(self):
+        cfg = SlurmConfig(partition="hawkcpu", mem="350400M")
+
+        assert "#SBATCH --mem=350400M" in cfg.to_sbatch_lines()
+
+    def test_mem_per_cpu_not_emitted_when_mem_is_set(self):
+        cfg = SlurmConfig(partition="hawkcpu", mem="350400M")
+
+        lines = cfg.to_sbatch_lines()
+
+        assert "#SBATCH --mem=350400M" in lines
+        assert not any("--mem-per-cpu" in line for line in lines)
+
+    def test_mem_per_cpu_emitted_when_mem_is_unset(self):
+        cfg = SlurmConfig(partition="hawkcpu", mem_per_cpu="4G")
+
+        assert "#SBATCH --mem-per-cpu=4G" in cfg.to_sbatch_lines()
+
+    def test_rejects_mem_and_mem_per_cpu_together(self):
+        with pytest.raises(ValueError, match="mem.*mem_per_cpu"):
+            SlurmConfig(partition="hawkcpu", mem="350400M", mem_per_cpu="4G")
+
 
 class TestPipelineConfigRoundtrip:
     def test_save_and_load(self, tmp_path: Path):
@@ -87,8 +117,28 @@ class TestPipelineConfigRoundtrip:
         assert loaded.conda_env == original.conda_env
         assert loaded.slurm.partition == "hawkcpu"
         assert loaded.slurm.cpus_per_task == 32
-        assert loaded.slurm.time_limit == "48:00:00"
+        assert loaded.slurm.time_limit == "72:00:00"
         assert loaded.slurm.nodes == 1
+
+    def test_from_dict_backward_compat_mem_per_cpu(self):
+        cfg = SlurmConfig.from_dict(
+            {"partition": "hawkcpu", "mem_per_cpu": "4G"}
+        )
+
+        assert cfg.mem is None
+        assert cfg.mem_per_cpu == "4G"
+
+    def test_from_dict_with_mem_key(self):
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu", "mem": "350400M"})
+
+        assert cfg.mem == "350400M"
+        assert cfg.mem_per_cpu is None
+
+    def test_from_dict_rejects_mem_and_mem_per_cpu(self):
+        with pytest.raises(ValueError, match="mem.*mem_per_cpu"):
+            SlurmConfig.from_dict(
+                {"partition": "hawkcpu", "mem": "350400M", "mem_per_cpu": "4G"}
+            )
 
     def test_load_missing_file(self):
         with pytest.raises(FileNotFoundError):
@@ -179,3 +229,38 @@ class TestOpenFileLimitConfig:
         config.save(path)
         loaded = PipelineConfig.load(path)
         assert loaded.slurm.open_file_limit is None
+
+
+class TestScratchConfig:
+    def test_scratch_dir_in_to_dict(self):
+        cfg = SlurmConfig(partition="hawkcpu", scratch_dir="/scratch/user")
+
+        assert cfg.to_dict()["scratch_dir"] == "/scratch/user"
+
+    def test_scratch_dir_default_none(self):
+        cfg = SlurmConfig(partition="hawkcpu")
+
+        assert "scratch_dir" in cfg.to_dict()
+        assert cfg.to_dict()["scratch_dir"] is None
+
+    def test_scratch_dir_from_dict_missing(self):
+        cfg = SlurmConfig.from_dict({"partition": "hawkcpu"})
+
+        assert cfg.scratch_dir is None
+
+    def test_scratch_dir_not_in_sbatch_lines(self):
+        cfg = SlurmConfig(partition="hawkcpu", scratch_dir="/scratch/user")
+
+        assert not any("scratch" in line for line in cfg.to_sbatch_lines())
+
+    def test_is_ephemeral_scratch_roundtrip(self):
+        original = SlurmConfig(
+            partition="hawkcpu",
+            scratch_dir="/local/scratch",
+            is_ephemeral_scratch=True,
+        )
+
+        restored = SlurmConfig.from_dict(original.to_dict())
+
+        assert restored.scratch_dir == "/local/scratch"
+        assert restored.is_ephemeral_scratch is True

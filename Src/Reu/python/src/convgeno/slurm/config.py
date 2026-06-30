@@ -37,22 +37,36 @@ class SlurmConfig:
     """SLURM resource configuration for a single job submission."""
 
     partition: str
-    time_limit: str = "48:00:00"
+    time_limit: str = "72:00:00"
     nodes: int = 1
     ntasks: int = 1
     cpus_per_task: int = 16
-    mem_per_cpu: str = "4G"
+    mem: str | None = None
+    mem_per_cpu: str | None = None
     account: Optional[str] = None
     mail_user: Optional[str] = None
     mail_type: str = "END,FAIL"
     output_pattern: str = "logs/%x_%j.out"
     error_pattern: str = "logs/%x_%j.err"
     open_file_limit: Optional[int] = None
+    scratch_dir: str | None = None  # Scratch space root. None = run in output_dir.
+    is_ephemeral_scratch: bool = False  # True when scratch is node-local.
     extra_sbatch_args: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Validate mutually exclusive SLURM memory request fields."""
+        if self.mem is not None and self.mem_per_cpu is not None:
+            raise ValueError("SlurmConfig cannot set both 'mem' and 'mem_per_cpu'.")
 
     def to_dict(self) -> dict:
         """Serialize to a dict, omitting fields whose value is ``None``."""
-        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+        # ## NEW: Keep scratch fields visible in YAML as run-time documentation.
+        always_include = {"mem", "mem_per_cpu", "scratch_dir", "is_ephemeral_scratch"}
+        return {
+            k: v
+            for k, v in dataclasses.asdict(self).items()
+            if v is not None or k in always_include
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> SlurmConfig:
@@ -92,6 +106,7 @@ class SlurmConfig:
             "nodes": "--nodes",
             "ntasks": "--ntasks",
             "cpus_per_task": "--cpus-per-task",
+            "mem": "--mem",
             "mem_per_cpu": "--mem-per-cpu",
             "mail_user": "--mail-user",
             "mail_type": "--mail-type",

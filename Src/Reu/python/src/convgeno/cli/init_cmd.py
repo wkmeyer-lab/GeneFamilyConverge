@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+from convgeno.external.config import OrthoFinderConfig
 from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
-from convgeno.slurm.discovery import discover_partitions
+from convgeno.slurm.discovery import (
+    detect_node_cpus,
+    detect_partition_memory,
+    detect_scratch_dir,
+    discover_partitions,
+    recommend_memory_mb,
+)
 from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     detect_conda_runtime,
@@ -71,6 +79,58 @@ def _prompt_optional_int(message: str, default: int | None = None) -> int | None
         return _prompt_optional_int(message, default)
 
 
+def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
+    """Derive OrthoFinder search and analysis thread counts."""
+    if recommended_physical <= 0:
+        return 16, 4
+    return recommended_physical, max(recommended_physical // 4, 1)
+
+
+def _parse_aligner_choice(user_input: str) -> str:
+    """Parse an interactive OrthoFinder MSA aligner choice."""
+    choice = user_input.strip().lower()
+    if choice in {"", "1", "mafft"}:
+        return "mafft"
+    if choice in {"2", "famsa"}:
+        return "famsa"
+    return "mafft"
+
+
+def _default_orthofinder_output_dir(
+    project_dir: Path,
+    *,
+    timestamp: str | None = None,
+) -> Path:
+    """Return a fresh timestamped default output path for single-node OrthoFinder."""
+    run_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    return (
+        project_dir
+        / "Data"
+        / "processed"
+        / f"orthofinder_single_{run_timestamp}"
+    )
+
+
+def _format_detected_memory(value: int | None) -> str:
+    return f"{value} MB" if value is not None else "unavailable"
+
+
+def _memory_recommendation_basis(
+    cpus_per_task: int,
+    memory_detection: dict[str, int | None],
+) -> str:
+    max_mem_per_cpu = memory_detection["max_mem_per_cpu_mb"]
+    def_mem_per_cpu = memory_detection["def_mem_per_cpu_mb"]
+    min_node_memory = memory_detection["min_node_memory_mb"]
+    if max_mem_per_cpu is not None and max_mem_per_cpu > 0:
+        return f"MaxMemPerCPU={max_mem_per_cpu} MB x cpus_per_task={cpus_per_task}"
+    if def_mem_per_cpu is not None and def_mem_per_cpu > 0:
+        return f"DefMemPerCPU={def_mem_per_cpu} MB x cpus_per_task={cpus_per_task}"
+    if min_node_memory is not None and min_node_memory > 0:
+        return f"90% of minimum node memory ({min_node_memory} MB)"
+    return "user-provided explicit memory request"
+
+
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
     """Run the interactive init wizard to create pipeline_config.yaml."""
     path = Path(output_path)
@@ -120,7 +180,76 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print("\nNo SLURM partitions detected (sinfo not available).")
         partition_name = _prompt("Enter your SLURM partition name")
 
-    cpus_per_task = _prompt_int("CPUs per task", default=16)
+    cpu_detection = detect_node_cpus(partition_name)
+    recommended_cpus = cpu_detection["recommended_physical"] or 16
+    print(
+        f"Detected {cpu_detection['node_count']} nodes in '{partition_name}', "
+        f"{cpu_detection['min_cpus_per_node']} CPUs/node "
+        f"(physical: {cpu_detection['physical_cores']}, "
+        f"threads/core: {cpu_detection['threads_per_core']})"
+    )
+    print(
+        f"Recommended CPUs per task: {recommended_cpus} "
+        "(reserves 4 cores for memory headroom)"
+    )
+
+    cpus_per_task = _prompt_int("CPUs per task", default=recommended_cpus)
+    memory_detection = detect_partition_memory(partition_name)
+    print("Detected partition memory limits:")
+    print(
+        "  MaxMemPerCPU: "
+        f"{_format_detected_memory(memory_detection['max_mem_per_cpu_mb'])}"
+    )
+    print(
+        "  DefMemPerCPU: "
+        f"{_format_detected_memory(memory_detection['def_mem_per_cpu_mb'])}"
+    )
+    print(
+        "  Minimum node memory: "
+        f"{_format_detected_memory(memory_detection['min_node_memory_mb'])}"
+    )
+    memory_basis = _memory_recommendation_basis(cpus_per_task, memory_detection)
+    try:
+        recommended_memory_mb = recommend_memory_mb(
+            cpus_per_task=cpus_per_task,
+            max_mem_per_cpu_mb=memory_detection["max_mem_per_cpu_mb"],
+            def_mem_per_cpu_mb=memory_detection["def_mem_per_cpu_mb"],
+            min_node_memory_mb=memory_detection["min_node_memory_mb"],
+        )
+        recommended_memory = f"{recommended_memory_mb}M"
+        print(f"Recommended memory request: {recommended_memory}")
+        print(f"Reason: {memory_basis}")
+        memory_request = _prompt("Memory request", default=recommended_memory)
+        if memory_request != recommended_memory:
+            memory_basis = "user-provided explicit memory request"
+    except ValueError:
+        print(
+            "Could not detect partition memory limits. Please enter an "
+            "explicit SLURM memory request."
+        )
+        memory_request = _prompt("Memory request (e.g. 350400M)")
+        memory_basis = "user-provided explicit memory request"
+
+    search_threads, analysis_threads = _derive_orthofinder_threads(cpus_per_task)
+    print(
+        f"OrthoFinder threads: -t {search_threads} (sequence search), "
+        f"-a {analysis_threads} (analysis)"
+    )
+    print("MSA aligner for OrthoFinder gene tree inference:")
+    print(
+        "  [1] mafft  — slower, more accurate "
+        "(recommended: species tree used for state reconstruction)"
+    )
+    print(
+        "  [2] famsa  — faster, slightly less accurate "
+        "(use for large datasets where speed matters)"
+    )
+    msa_program = _parse_aligner_choice(_prompt("Select MSA aligner", default="1"))
+    if msa_program == "famsa":
+        print(
+            "Using FAMSA. Ensure it is installed in your conda environment: "
+            "conda install -c bioconda famsa"
+        )
     if (
         selected_partition is not None
         and selected_partition.max_cpus_per_node > 0
@@ -132,14 +261,38 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             f"CPUs per node."
         )
 
-    time_limit = _prompt("Job time limit (HH:MM:SS or D-HH:MM:SS)", default="48:00:00")
+    # ## NEW: Detect scratch space for OrthoFinder's intermediate-file workload.
+    scratch_detection = detect_scratch_dir()
+    scratch_base = scratch_detection["scratch_base"]
+    is_ephemeral_scratch = bool(scratch_detection["is_ephemeral"])
+    if scratch_base is not None:
+        scratch_kind = (
+            "ephemeral — results will be copied back before job ends"
+            if is_ephemeral_scratch
+            else "persistent"
+        )
+        print(f"Detected scratch space: {scratch_base} ({scratch_kind})")
+        print(
+            "Using scratch will improve I/O performance for OrthoFinder's "
+            "many intermediate files."
+        )
+    else:
+        print(
+            "No scratch space detected. OrthoFinder will run directly in the "
+            "output directory."
+        )
+        print(
+            "This may be slower on shared filesystems (e.g., Ceph) due to "
+            "I/O pressure from intermediate files."
+        )
+
+    time_limit = _prompt("Job time limit (HH:MM:SS or D-HH:MM:SS)", default="72:00:00")
     if ":" not in time_limit:
         print(
             "  Warning: time limit format may be invalid. "
             "Expected HH:MM:SS or D-HH:MM:SS."
         )
 
-    mem_per_cpu = _prompt("Memory per CPU", default="4G")
     mail_user = _prompt_optional("Email for SLURM job notifications")
     account = normalize_optional_account(
         _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
@@ -161,10 +314,21 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         partition=partition_name,
         time_limit=time_limit,
         cpus_per_task=cpus_per_task,
-        mem_per_cpu=mem_per_cpu,
+        mem=memory_request,
+        mem_per_cpu=None,
         mail_user=mail_user,
         account=account,
         open_file_limit=open_file_limit,
+        scratch_dir=str(scratch_base) if scratch_base is not None else None,
+        is_ephemeral_scratch=is_ephemeral_scratch,
+    )
+    project_path = Path(project_dir)
+    orthofinder = OrthoFinderConfig(
+        input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
+        output_dir=str(_default_orthofinder_output_dir(project_path)),
+        search_threads=search_threads,
+        analysis_threads=analysis_threads,
+        msa_program=msa_program,
     )
 
     # ---- Detect conda runtime configuration ----
@@ -208,6 +372,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         project_dir=project_dir,
         conda_env=conda_env,
         slurm=slurm,
+        orthofinder=orthofinder,
         runtime=runtime_config,
     )
 
@@ -220,11 +385,16 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  SLURM partition:    {partition_name}")
     print(f"  CPUs per task:      {cpus_per_task}")
     print(f"  Time limit:         {time_limit}")
-    print(f"  Memory per CPU:     {mem_per_cpu}")
+    print(f"  Memory:             {memory_request}")
+    print(f"  Memory basis:       {memory_basis}")
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
     print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")
+    print(f"  Scratch directory:  {scratch_base if scratch_base is not None else 'not set'}")
+    print(f"  OrthoFinder -t:     {search_threads}")
+    print(f"  OrthoFinder -a:     {analysis_threads}")
+    print(f"  OrthoFinder MSA:    {msa_program}")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")

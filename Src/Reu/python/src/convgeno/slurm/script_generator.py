@@ -9,6 +9,37 @@ from convgeno.slurm.config import PipelineConfig
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 
+def _orthofinder_command_block(config: PipelineConfig) -> str:
+    if config.orthofinder is None:
+        raise ValueError("OrthoFinder settings not found in pipeline config.")
+
+    lines = [
+        "orthofinder \\",
+        '  -f "$EFFECTIVE_INPUT" \\',
+        '  -o "$EFFECTIVE_OUTPUT" \\',
+        '  -t "$ORTHOFINDER_SEARCH_THREADS" \\',
+        '  -a "$ORTHOFINDER_ANALYSIS_THREADS" \\',
+        f"  -S {config.orthofinder.sequence_search}",
+    ]
+    if config.orthofinder.msa_program:
+        lines[-1] += " \\"
+        lines.extend(
+            [
+                "  -M msa \\",
+                '  -A "$ORTHOFINDER_MSA_PROGRAM"',
+            ]
+        )
+        if config.orthofinder.tree_program:
+            lines[-1] += " \\"
+            lines.append(f"  -T {config.orthofinder.tree_program}")
+
+    for extra_arg in config.orthofinder.extra_args:
+        lines[-1] += " \\"
+        lines.append(f"  {extra_arg}")
+
+    return "\n".join(lines)
+
+
 def generate_orthofinder_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
@@ -56,8 +87,68 @@ def generate_orthofinder_script(
     sbatch_lines.insert(0, "#SBATCH --job-name=convgeno_orthofinder")
     sbatch_lines.append("#SBATCH --export=ALL")
 
-    of_args = config.orthofinder.to_command_args()
-    of_command = "orthofinder " + " ".join(of_args)
+    scratch_dir = config.slurm.scratch_dir
+    scratch_enabled = scratch_dir is not None
+    of_command = _orthofinder_command_block(config)
+
+    scratch_setup_block = ""
+    scratch_copy_inputs_block = ""
+    scratch_rsync_back_block = ""
+    scratch_cleanup_block = ""
+    if scratch_enabled:
+        scratch_setup_block = f"""
+# ## NEW: Scratch space setup
+JOB_SCRATCH="{scratch_dir}/${{SLURM_JOB_ID}}"
+SCRATCH_INPUT="$JOB_SCRATCH/input_fastas"
+SCRATCH_OUTPUT="$JOB_SCRATCH/orthofinder_output"
+SCRATCH_TMP="$JOB_SCRATCH/tmp"
+EFFECTIVE_INPUT="$SCRATCH_INPUT"
+EFFECTIVE_OUTPUT="$SCRATCH_OUTPUT"
+
+mkdir -p "$SCRATCH_INPUT" "$SCRATCH_TMP"
+
+export TMPDIR="$SCRATCH_TMP"
+export TEMP="$SCRATCH_TMP"
+export TMP="$SCRATCH_TMP"
+
+echo "Using scratch directory: $JOB_SCRATCH"
+df -h "$JOB_SCRATCH" 2>/dev/null || true
+
+# ## NEW: Trap to copy partial results on job cancellation or timeout.
+cleanup_scratch() {{
+    echo "Signal received — copying partial results from scratch..."
+    if [ -d "$SCRATCH_OUTPUT" ]; then
+        rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/ 2>/dev/null || true
+        echo "Partial results copied to: $OUTPUT_DIR"
+    fi
+}}
+trap cleanup_scratch SIGTERM SIGINT EXIT
+"""
+        scratch_copy_inputs_block = """
+# ## NEW: Copy validated FASTA inputs to scratch before running OrthoFinder.
+echo "Copying FASTA files to scratch at: $(date)"
+rsync -a --include="*.fa" --include="*.fasta" --include="*.faa" --exclude="*" "$INPUT_DIR"/ "$SCRATCH_INPUT"/
+SCRATCH_FASTA_COUNT=$(find "$SCRATCH_INPUT" -maxdepth 1 -name "*.fa" -o -name "*.fasta" -o -name "*.faa" | wc -l)
+echo "Copied $SCRATCH_FASTA_COUNT FASTA files to scratch"
+echo "Scratch input size: $(du -sh "$SCRATCH_INPUT" | cut -f1)"
+"""
+        scratch_rsync_back_block = """
+# ## NEW: Copy scratch results back before post-run validation.
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "Copying results from scratch to final output at: $(date)"
+    mkdir -p "$OUTPUT_DIR"
+    rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/
+    echo "Results copied to: $OUTPUT_DIR"
+fi
+"""
+        scratch_cleanup_block = """
+# ## NEW: Clean up scratch after a successful result copy.
+# Clean up scratch
+if [ -d "$JOB_SCRATCH" ]; then
+    echo "Cleaning up scratch directory: $JOB_SCRATCH"
+    rm -rf "$JOB_SCRATCH"
+fi
+"""
 
     sbatch_block = "\n".join(sbatch_lines)
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
@@ -96,11 +187,17 @@ echo "OrthoFinder version:"
 orthofinder -h 2>&1 | head -n 2 || true
 echo ""
 
+INPUT_DIR="{config.orthofinder.input_dir}"
+OUTPUT_DIR="{config.orthofinder.output_dir}"
+EFFECTIVE_INPUT="$INPUT_DIR"
+EFFECTIVE_OUTPUT="$OUTPUT_DIR"
+ORTHOFINDER_SEARCH_THREADS="{config.orthofinder.search_threads}"
+ORTHOFINDER_ANALYSIS_THREADS="{config.orthofinder.analysis_threads if config.orthofinder.analysis_threads is not None else 1}"
+ORTHOFINDER_MSA_PROGRAM="{config.orthofinder.msa_program}"
+{scratch_setup_block}
 # ------------------------------------------------------------
 # Validate inputs
 # ------------------------------------------------------------
-INPUT_DIR="{config.orthofinder.input_dir}"
-OUTPUT_DIR="{config.orthofinder.output_dir}"
 
 if [ ! -d "$INPUT_DIR" ]; then
     echo "ERROR: Input directory does not exist: $INPUT_DIR"
@@ -128,17 +225,23 @@ if [ -e "$OUTPUT_DIR" ]; then
     echo "Choose a fresh output_dir in pipeline_config.yaml."
     exit 1
 fi
+{scratch_copy_inputs_block}
 
 # ------------------------------------------------------------
 # Run OrthoFinder
 # ------------------------------------------------------------
 echo "Running OrthoFinder..."
-echo "Command: {of_command}"
+echo "Command:"
+cat <<'CONVGENO_ORTHOFINDER_COMMAND'
+{of_command}
+CONVGENO_ORTHOFINDER_COMMAND
 echo ""
 
+set +e
 {of_command}
-
 EXIT_CODE=$?
+set -e
+{scratch_rsync_back_block}
 
 # ------------------------------------------------------------
 # Post-run validation
@@ -156,9 +259,9 @@ echo "End:       $(date)"
 echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
 echo "============================================================"
 
-if [ $EXIT_CODE -ne 0 ]; then
+if [ "$EXIT_CODE" -ne 0 ]; then
     echo "ERROR: OrthoFinder exited with code $EXIT_CODE"
-    exit $EXIT_CODE
+    exit "$EXIT_CODE"
 fi
 
 # Check that key output files exist
@@ -169,6 +272,7 @@ if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
 fi
 
 echo "OrthoFinder completed successfully."
+{scratch_cleanup_block}
 exit 0
 """
     return script

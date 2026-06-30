@@ -32,7 +32,10 @@ def sample_config(sample_runtime) -> PipelineConfig:
         project_dir="/share/ceph/project",
         conda_env="convgeno",
         slurm=SlurmConfig(
-            partition="hawkcpu", cpus_per_task=16, time_limit="48:00:00"
+            partition="hawkcpu",
+            cpus_per_task=16,
+            time_limit="72:00:00",
+            mem="350400M",
         ),
         orthofinder=OrthoFinderConfig(
             input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
@@ -50,9 +53,34 @@ class TestGenerateOrthoFinderScript:
     def test_contains_sbatch_directives(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
         assert "#SBATCH --partition=hawkcpu" in script
-        assert "#SBATCH --time=48:00:00" in script
+        assert "#SBATCH --time=72:00:00" in script
         assert "#SBATCH --cpus-per-task=16" in script
+        assert "#SBATCH --mem=350400M" in script
         assert "#SBATCH --job-name=convgeno_orthofinder" in script
+
+    def test_does_not_emit_mem_zero_unless_explicit(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "#SBATCH --mem=0" not in script
+
+    def test_explicit_mem_zero_is_preserved(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/project",
+            slurm=SlurmConfig(partition="hawkcpu", mem="0"),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "#SBATCH --mem=0" in script
 
     def test_contains_conda_activation(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
@@ -61,14 +89,19 @@ class TestGenerateOrthoFinderScript:
     def test_contains_orthofinder_command(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
         assert "orthofinder" in script
-        assert "-f /share/ceph/project/Data/interim/cleaned_proteomes" in script
-        assert "-o /share/ceph/project/Data/processed/orthofinder" in script
-        assert "-t 16" in script
-        assert "-a 8" in script
+        assert 'INPUT_DIR="/share/ceph/project/Data/interim/cleaned_proteomes"' in script
+        assert 'OUTPUT_DIR="/share/ceph/project/Data/processed/orthofinder"' in script
+        assert '-f "$EFFECTIVE_INPUT"' in script
+        assert '-o "$EFFECTIVE_OUTPUT"' in script
+        assert 'ORTHOFINDER_SEARCH_THREADS="16"' in script
+        assert 'ORTHOFINDER_ANALYSIS_THREADS="8"' in script
+        assert '-t "$ORTHOFINDER_SEARCH_THREADS"' in script
+        assert '-a "$ORTHOFINDER_ANALYSIS_THREADS"' in script
         assert "-S diamond" in script
         # OrthoFinder's -M takes a method, not a program name.
         assert "-M msa" in script
-        assert "-A mafft" in script
+        assert 'ORTHOFINDER_MSA_PROGRAM="mafft"' in script
+        assert '-A "$ORTHOFINDER_MSA_PROGRAM"' in script
         assert "-T fasttree" in script
         assert "-M mafft" not in script
 
@@ -100,7 +133,28 @@ class TestGenerateOrthoFinderScript:
     def test_contains_exit_code_check(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
         assert "EXIT_CODE=$?" in script
-        assert "exit $EXIT_CODE" in script
+        assert 'exit "$EXIT_CODE"' in script
+
+    def test_disables_errexit_only_for_orthofinder_command(
+        self, sample_config: PipelineConfig
+    ):
+        script = generate_orthofinder_script(sample_config)
+
+        set_plus_index = script.index("set +e")
+        command_index = script.index("orthofinder \\\n", set_plus_index)
+        exit_code_index = script.index("EXIT_CODE=$?", command_index)
+        set_minus_index = script.index("set -e", exit_code_index)
+
+        assert set_plus_index < command_index < exit_code_index < set_minus_index
+
+    def test_failure_handler_exits_with_orthofinder_status(
+        self, sample_config: PipelineConfig
+    ):
+        script = generate_orthofinder_script(sample_config)
+
+        assert 'if [ "$EXIT_CODE" -ne 0 ]; then' in script
+        assert "ERROR: OrthoFinder exited with code $EXIT_CODE" in script
+        assert 'exit "$EXIT_CODE"' in script
 
     def test_contains_timing(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
@@ -182,6 +236,65 @@ class TestGenerateOrthoFinderScript:
         script = generate_orthofinder_script(config, alt_runtime)
         assert 'CONDA_BASE="/alt/conda"' in script
         assert 'conda activate "$CONDA_ENV"' in script
+
+    def test_script_without_scratch(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "JOB_SCRATCH" not in script
+        assert "rsync" not in script
+        assert "SCRATCH_INPUT" not in script
+        assert "cleanup_scratch" not in script
+
+    def test_script_with_scratch(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/Data/interim/cleaned_proteomes",
+                output_dir="/share/ceph/project/Data/processed/orthofinder",
+            ),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'JOB_SCRATCH="/share/ceph/scratch/testuser/${SLURM_JOB_ID}"' in script
+        assert "SCRATCH_INPUT=" in script
+        assert "SCRATCH_OUTPUT=" in script
+        assert "export TMPDIR=" in script
+        assert script.count("rsync -a") >= 2
+        assert "cleanup_scratch" in script
+        assert "trap cleanup_scratch" in script
+        assert 'orthofinder \\\n  -f "$EFFECTIVE_INPUT" \\\n  -o "$EFFECTIVE_OUTPUT"' in script
+        assert "orthofinder -f /share/ceph/project/Data/interim/cleaned_proteomes" not in script
+
+    def test_scratch_cleanup_present(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' in script
+
+    def test_effective_paths_without_scratch(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert 'EFFECTIVE_INPUT="$INPUT_DIR"' in script
+        assert 'EFFECTIVE_OUTPUT="$OUTPUT_DIR"' in script
+        assert '-f "$EFFECTIVE_INPUT"' in script
+        assert '-o "$EFFECTIVE_OUTPUT"' in script
 
 
 class TestWriteScript:

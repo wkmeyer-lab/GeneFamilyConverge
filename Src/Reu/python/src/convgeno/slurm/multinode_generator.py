@@ -50,12 +50,13 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
 
     Returns the lines joined into a single ``\\n``-separated string.
     """
-    lines: dict[str, str] = {
+    lines: dict[str, str | None] = {
         "--partition": config.slurm.partition,
         "--nodes": str(config.slurm.nodes),
         "--ntasks": str(config.slurm.ntasks),
         "--cpus-per-task": str(config.slurm.cpus_per_task),
         "--time": config.slurm.time_limit,
+        "--mem": config.slurm.mem,
         "--mem-per-cpu": config.slurm.mem_per_cpu,
         "--output": config.slurm.output_pattern,
         "--error": config.slurm.error_pattern,
@@ -70,7 +71,11 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
 
     lines.update(overrides)
 
-    formatted = [f"#SBATCH {flag}={value}" for flag, value in lines.items()]
+    formatted = [
+        f"#SBATCH {flag}={value}"
+        for flag, value in lines.items()
+        if value is not None
+    ]
     for arg in config.slurm.extra_sbatch_args:
         formatted.append(f"#SBATCH {arg}")
     return "\n".join(formatted)
