@@ -272,6 +272,11 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
             else "persistent"
         )
         print(f"Detected scratch space: {scratch_base} ({scratch_kind})")
+        if scratch_detection.get("write_granted"):
+            print(
+                f"  Added owner-write permission (chmod u+w) to {scratch_base} "
+                "so it can be used as scratch."
+            )
         print(
             "Using scratch will improve I/O performance for OrthoFinder's "
             "many intermediate files."

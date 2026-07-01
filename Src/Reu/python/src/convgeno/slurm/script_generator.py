@@ -98,7 +98,41 @@ def generate_orthofinder_script(
     if scratch_enabled:
         scratch_setup_block = f"""
 # ## NEW: Scratch space setup
-JOB_SCRATCH="{scratch_dir}/${{SLURM_JOB_ID}}"
+# ## NEW: Resolve a writable scratch base (self-heal permissions, else fall back).
+PREFERRED_SCRATCH="{scratch_dir}"
+FALLBACK_SCRATCH="/tmp/scratch"
+
+resolve_scratch_base() {{
+    local base="$1"
+    # If we own it but lack the write bit, add owner-write (chmod u+w).
+    if [ -d "$base" ] && [ ! -w "$base" ] && [ -O "$base" ]; then
+        chmod u+w "$base" 2>/dev/null || true
+    fi
+    mkdir -p "$base" 2>/dev/null || true
+    # Definitive write probe.
+    if [ -d "$base" ]; then
+        local probe="$base/.convgeno_wtest.$$"
+        if ( : > "$probe" ) 2>/dev/null; then
+            rm -f "$probe"
+            printf '%s' "$base"
+            return 0
+        fi
+    fi
+    return 1
+}}
+
+SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
+if [ -z "$SCRATCH_BASE" ]; then
+    echo "WARNING: preferred scratch '$PREFERRED_SCRATCH' not writable; falling back to '$FALLBACK_SCRATCH'"
+    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
+fi
+if [ -z "$SCRATCH_BASE" ]; then
+    echo "ERROR: no writable scratch base found; aborting." >&2
+    exit 1
+fi
+echo "Resolved scratch base: $SCRATCH_BASE"
+
+JOB_SCRATCH="$SCRATCH_BASE/${{SLURM_JOB_ID}}"
 SCRATCH_INPUT="$JOB_SCRATCH/input_fastas"
 SCRATCH_OUTPUT="$JOB_SCRATCH/orthofinder_output"
 SCRATCH_TMP="$JOB_SCRATCH/tmp"

@@ -262,7 +262,10 @@ class TestGenerateOrthoFinderScript:
 
         script = generate_orthofinder_script(config)
 
-        assert 'JOB_SCRATCH="/share/ceph/scratch/testuser/${SLURM_JOB_ID}"' in script
+        # The preferred base is baked in, but JOB_SCRATCH derives from the
+        # runtime-resolved base so the script can self-heal / fall back.
+        assert 'PREFERRED_SCRATCH="/share/ceph/scratch/testuser"' in script
+        assert 'JOB_SCRATCH="$SCRATCH_BASE/${SLURM_JOB_ID}"' in script
         assert "SCRATCH_INPUT=" in script
         assert "SCRATCH_OUTPUT=" in script
         assert "export TMPDIR=" in script
@@ -271,6 +274,37 @@ class TestGenerateOrthoFinderScript:
         assert "trap cleanup_scratch" in script
         assert 'orthofinder \\\n  -f "$EFFECTIVE_INPUT" \\\n  -o "$EFFECTIVE_OUTPUT"' in script
         assert "orthofinder -f /share/ceph/project/Data/interim/cleaned_proteomes" not in script
+
+    def test_scratch_runtime_resolver_present(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        # Self-healing resolver: chmod u+w when owned-but-unwritable, real
+        # write probe, then fall back to /tmp/scratch.
+        assert "resolve_scratch_base()" in script
+        assert "chmod u+w" in script
+        assert ".convgeno_wtest" in script
+        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+        assert 'SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"' in script
+
+    def test_scratch_resolver_absent_without_scratch(
+        self, sample_config: PipelineConfig
+    ):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "resolve_scratch_base" not in script
+        assert "PREFERRED_SCRATCH" not in script
+        assert "chmod u+w" not in script
 
     def test_scratch_cleanup_present(self, sample_runtime):
         config = PipelineConfig(
