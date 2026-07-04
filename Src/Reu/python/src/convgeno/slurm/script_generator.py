@@ -175,13 +175,25 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "Results copied to: $OUTPUT_DIR"
 fi
 """
-        scratch_cleanup_block = """
-# ## NEW: Clean up scratch after a successful result copy.
-# Clean up scratch
+        # ## NEW: Cleanup depends on scratch type.
+        # Ephemeral (node-local) scratch is reclaimed on job exit, so removal is
+        # best-effort and must not fail an otherwise-successful job under set -e.
+        # Persistent shared scratch is managed by the cluster's purge policy and
+        # typically cannot (and should not) be removed by the user, so we only
+        # leave an informational message and never attempt an rm.
+        if config.slurm.is_ephemeral_scratch:
+            scratch_cleanup_block = """
+# ## NEW: Clean up ephemeral scratch (best-effort — node-local space is reclaimed on job exit regardless)
 if [ -d "$JOB_SCRATCH" ]; then
-    echo "Cleaning up scratch directory: $JOB_SCRATCH"
-    rm -rf "$JOB_SCRATCH"
+    echo "Cleaning up ephemeral scratch: $JOB_SCRATCH"
+    rm -rf "$JOB_SCRATCH" || echo "WARNING: could not remove $JOB_SCRATCH (non-fatal; node will reclaim it)"
 fi
+"""
+        else:
+            scratch_cleanup_block = """
+# ## NEW: Persistent scratch — do not delete. Cluster purge policy reclaims this space automatically.
+echo "Scratch results left in: $JOB_SCRATCH"
+echo "This is persistent scratch and will be removed by the cluster's purge policy. No manual cleanup needed."
 """
 
     sbatch_block = "\n".join(sbatch_lines)

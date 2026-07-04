@@ -313,6 +313,7 @@ class TestGenerateOrthoFinderScript:
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 scratch_dir="/share/ceph/scratch/testuser",
+                is_ephemeral_scratch=True,
             ),
             orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
             runtime=sample_runtime,
@@ -321,6 +322,55 @@ class TestGenerateOrthoFinderScript:
         script = generate_orthofinder_script(config)
 
         assert 'rm -rf "$JOB_SCRATCH"' in script
+
+    def test_ephemeral_scratch_cleanup_is_nonfatal(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/tmp/scratch",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "Cleaning up ephemeral scratch" in script
+        assert 'rm -rf "$JOB_SCRATCH"' in script
+        # The failed rm must not propagate a non-zero exit under set -euo pipefail.
+        rm_line = next(
+            line for line in script.splitlines() if 'rm -rf "$JOB_SCRATCH"' in line
+        )
+        assert "||" in rm_line
+        assert "WARNING" in script
+
+    def test_persistent_scratch_no_rm(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+                is_ephemeral_scratch=False,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' not in script
+        assert "purge policy" in script
+        assert "No manual cleanup needed" in script
+
+    def test_no_scratch_no_cleanup_block(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' not in script
+        assert "purge policy" not in script
 
     def test_effective_paths_without_scratch(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
