@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import List
 
@@ -277,29 +279,93 @@ def recommend_memory_mb(
 
 
 def _empty_scratch_detection() -> dict[str, str | bool | None]:
-    return {"scratch_base": None, "is_ephemeral": False, "method": "none"}
+    return {
+        "scratch_base": None,
+        "is_ephemeral": False,
+        "method": "none",
+        "write_granted": False,
+    }
 
 
 def _is_ephemeral_scratch_path(path: str) -> bool:
     return path.startswith(("/local", "/tmp", "/dev/shm"))
 
 
-def _usable_scratch_path(path: str, *, create_if_possible: bool) -> str | None:
+def _dir_is_writable(path: str) -> bool:
+    """Definitive writability test: create then remove a probe file in ``path``.
+
+    More reliable than ``os.access`` over NFS/root-squash filesystems, where
+    ``os.access`` can report a permission the kernel will actually deny.
+    """
     try:
-        if os.path.isdir(path):
-            return path if os.access(path, os.W_OK) else None
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".convgeno_wtest_"):
+            pass
+        return True
+    except OSError:
+        return False
 
-        if not create_if_possible:
-            return None
 
-        parent = os.path.dirname(path) or "/"
-        if os.path.isdir(parent) and os.access(parent, os.W_OK):
+def _current_user_owns(path: str) -> bool:
+    """Return ``True`` if ``path`` is owned by the effective user.
+
+    Guarded for platforms without ``os.geteuid`` (e.g. Windows dev machines),
+    where ownership cannot be determined and we conservatively return ``False``.
+    """
+    try:
+        return os.stat(path).st_uid == os.geteuid()
+    except (AttributeError, OSError):
+        return False
+
+
+def _grant_owner_write(path: str) -> bool:
+    """Add the owner-write bit (equivalent to ``chmod u+w``) to ``path``.
+
+    Returns ``True`` on success. Only the owner-write bit is added; group and
+    other permissions are left untouched.
+    """
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+        return True
+    except OSError:
+        return False
+
+
+def _usable_scratch_path(
+    path: str, *, create_if_possible: bool
+) -> tuple[str | None, bool]:
+    """Return ``(usable_path, write_granted)`` for a scratch candidate.
+
+    ``usable_path`` is ``path`` when it is (or can be made) a writable
+    directory, else ``None``. ``write_granted`` is ``True`` only when an
+    owner-write bit had to be added to make an owned-but-unwritable directory
+    usable.
+    """
+    try:
+        if not os.path.isdir(path):
+            if not create_if_possible:
+                return None, False
+            parent = os.path.dirname(path) or "/"
+            if not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
+                return None, False
             os.makedirs(path, exist_ok=True)
-            if os.path.isdir(path) and os.access(path, os.W_OK):
-                return path
+            if not os.path.isdir(path):
+                return None, False
+
+        # Directory exists; decide writability by a real write probe.
+        if _dir_is_writable(path):
+            return path, False
+
+        # Exists but not writable — try to grant owner-write if we own it.
+        if (
+            _current_user_owns(path)
+            and _grant_owner_write(path)
+            and _dir_is_writable(path)
+        ):
+            return path, True
+
+        return None, False
     except Exception:
-        return None
-    return None
+        return None, False
 
 
 def _scratch_path_is_on_home_filesystem(path: str) -> bool:
@@ -319,12 +385,15 @@ def detect_scratch_dir() -> dict[str, str | bool | None]:
     # ## NEW: Honor an explicit environment-provided scratch directory first.
     scratch_env = os.environ.get("SCRATCH")
     if scratch_env:
-        scratch_base = _usable_scratch_path(scratch_env, create_if_possible=False)
+        scratch_base, write_granted = _usable_scratch_path(
+            scratch_env, create_if_possible=False
+        )
         if scratch_base is not None:
             return {
                 "scratch_base": scratch_base,
                 "is_ephemeral": _is_ephemeral_scratch_path(scratch_base),
                 "method": "env_var",
+                "write_granted": write_granted,
             }
 
     username = os.environ.get("USER", "unknown")
@@ -337,7 +406,9 @@ def detect_scratch_dir() -> dict[str, str | bool | None]:
 
     # ## NEW: Probe known cluster scratch paths without raising on failures.
     for path, fixed_ephemeral in candidates:
-        scratch_base = _usable_scratch_path(path, create_if_possible=True)
+        scratch_base, write_granted = _usable_scratch_path(
+            path, create_if_possible=True
+        )
         if scratch_base is None:
             continue
         is_ephemeral = (
@@ -349,6 +420,7 @@ def detect_scratch_dir() -> dict[str, str | bool | None]:
             "scratch_base": scratch_base,
             "is_ephemeral": is_ephemeral,
             "method": "path_probe",
+            "write_granted": write_granted,
         }
 
     return _empty_scratch_detection()

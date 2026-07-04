@@ -6,6 +6,7 @@ Run with:  pytest tests/test_slurm_discovery.py -v
 
 from __future__ import annotations
 
+import stat
 from unittest.mock import Mock, patch
 
 import pytest
@@ -257,13 +258,17 @@ class TestDetectScratchDir:
                 "convgeno.slurm.discovery.os.path.isdir",
                 side_effect=lambda path: path == scratch_path,
             ),
-            patch("convgeno.slurm.discovery.os.access", return_value=True),
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                return_value=True,
+            ),
         ):
             detected = detect_scratch_dir()
 
         assert detected["scratch_base"] == scratch_path
         assert detected["is_ephemeral"] is False
         assert detected["method"] == "path_probe"
+        assert detected["write_granted"] is False
 
     def test_local_scratch_is_ephemeral(self):
         with (
@@ -272,7 +277,10 @@ class TestDetectScratchDir:
                 "convgeno.slurm.discovery.os.path.isdir",
                 side_effect=lambda path: path == "/local/scratch",
             ),
-            patch("convgeno.slurm.discovery.os.access", return_value=True),
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                return_value=True,
+            ),
         ):
             detected = detect_scratch_dir()
 
@@ -295,7 +303,14 @@ class TestDetectScratchDir:
         with (
             patch.dict("os.environ", {"USER": "testuser"}, clear=True),
             patch("convgeno.slurm.discovery.os.path.isdir", return_value=True),
-            patch("convgeno.slurm.discovery.os.access", return_value=False),
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                return_value=False,
+            ),
+            patch(
+                "convgeno.slurm.discovery._current_user_owns",
+                return_value=False,
+            ),
         ):
             detected = detect_scratch_dir()
 
@@ -313,6 +328,89 @@ class TestDetectScratchDir:
 
         assert detected["scratch_base"] is None
         assert detected["method"] == "none"
+
+    def test_scratch_write_granted_via_chmod(self):
+        username = "testuser"
+        scratch_path = f"/share/ceph/scratch/{username}"
+        fake_stat = Mock()
+        fake_stat.st_mode = 0o500  # r-x------, owner-write bit unset
+
+        with (
+            patch.dict("os.environ", {"USER": username}, clear=True),
+            patch(
+                "convgeno.slurm.discovery.os.path.isdir",
+                side_effect=lambda path: path == scratch_path,
+            ),
+            # Not writable at first, writable after chmod grants owner-write.
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                side_effect=[False, True],
+            ),
+            patch(
+                "convgeno.slurm.discovery._current_user_owns",
+                return_value=True,
+            ),
+            patch("convgeno.slurm.discovery.os.stat", return_value=fake_stat),
+            patch("convgeno.slurm.discovery.os.chmod") as mock_chmod,
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] == scratch_path
+        assert detected["is_ephemeral"] is False
+        assert detected["method"] == "path_probe"
+        assert detected["write_granted"] is True
+        # chmod added the owner-write bit to the existing mode.
+        mock_chmod.assert_called_once()
+        chmod_path, chmod_mode = mock_chmod.call_args.args
+        assert chmod_path == scratch_path
+        assert chmod_mode & stat.S_IWUSR
+
+    def test_scratch_chmod_fails_falls_back(self):
+        username = "testuser"
+        ceph = f"/share/ceph/scratch/{username}"
+
+        with (
+            patch.dict("os.environ", {"USER": username}, clear=True),
+            patch(
+                "convgeno.slurm.discovery.os.path.isdir",
+                side_effect=lambda path: path in (ceph, "/tmp/scratch"),
+            ),
+            # Preferred ceph dir unwritable; node-local /tmp/scratch is writable.
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                side_effect=lambda path: path == "/tmp/scratch",
+            ),
+            # We do not own the ceph dir, so chmod is never attempted.
+            patch(
+                "convgeno.slurm.discovery._current_user_owns",
+                return_value=False,
+            ),
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] == "/tmp/scratch"
+        assert detected["is_ephemeral"] is True
+        assert detected["method"] == "path_probe"
+        assert detected["write_granted"] is False
+
+    def test_scratch_not_owned_no_chmod(self):
+        with (
+            patch.dict("os.environ", {"USER": "testuser"}, clear=True),
+            patch("convgeno.slurm.discovery.os.path.isdir", return_value=True),
+            patch(
+                "convgeno.slurm.discovery._dir_is_writable",
+                return_value=False,
+            ),
+            patch(
+                "convgeno.slurm.discovery._current_user_owns",
+                return_value=False,
+            ),
+            patch("convgeno.slurm.discovery.os.chmod") as mock_chmod,
+        ):
+            detected = detect_scratch_dir()
+
+        assert detected["scratch_base"] is None
+        mock_chmod.assert_not_called()
 
 
 class TestPartitionInfoStr:

@@ -9,7 +9,7 @@ Capabilities
 - Transparent decompression (gzip, bz2) via magic-byte detection
 - Streaming FASTA record iteration backed by BioPython SeqIO
 - Gene-ID extraction with auto-detection of Ensembl / NCBI header formats
-- Single-pass longest-isoform filtering (v1; low-memory two-pass planned)
+- Longest-isoform filtering: single-pass and low-memory two-pass modes
 - Directory discovery of FASTA files by known bioinformatics extensions
 - Batch processing of one-file-per-species directories
 

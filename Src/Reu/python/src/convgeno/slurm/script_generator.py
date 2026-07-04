@@ -98,7 +98,41 @@ def generate_orthofinder_script(
     if scratch_enabled:
         scratch_setup_block = f"""
 # ## NEW: Scratch space setup
-JOB_SCRATCH="{scratch_dir}/${{SLURM_JOB_ID}}"
+# ## NEW: Resolve a writable scratch base (self-heal permissions, else fall back).
+PREFERRED_SCRATCH="{scratch_dir}"
+FALLBACK_SCRATCH="/tmp/scratch"
+
+resolve_scratch_base() {{
+    local base="$1"
+    # If we own it but lack the write bit, add owner-write (chmod u+w).
+    if [ -d "$base" ] && [ ! -w "$base" ] && [ -O "$base" ]; then
+        chmod u+w "$base" 2>/dev/null || true
+    fi
+    mkdir -p "$base" 2>/dev/null || true
+    # Definitive write probe.
+    if [ -d "$base" ]; then
+        local probe="$base/.convgeno_wtest.$$"
+        if ( : > "$probe" ) 2>/dev/null; then
+            rm -f "$probe"
+            printf '%s' "$base"
+            return 0
+        fi
+    fi
+    return 1
+}}
+
+SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
+if [ -z "$SCRATCH_BASE" ]; then
+    echo "WARNING: preferred scratch '$PREFERRED_SCRATCH' not writable; falling back to '$FALLBACK_SCRATCH'"
+    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
+fi
+if [ -z "$SCRATCH_BASE" ]; then
+    echo "ERROR: no writable scratch base found; aborting." >&2
+    exit 1
+fi
+echo "Resolved scratch base: $SCRATCH_BASE"
+
+JOB_SCRATCH="$SCRATCH_BASE/${{SLURM_JOB_ID}}"
 SCRATCH_INPUT="$JOB_SCRATCH/input_fastas"
 SCRATCH_OUTPUT="$JOB_SCRATCH/orthofinder_output"
 SCRATCH_TMP="$JOB_SCRATCH/tmp"
@@ -114,15 +148,18 @@ export TMP="$SCRATCH_TMP"
 echo "Using scratch directory: $JOB_SCRATCH"
 df -h "$JOB_SCRATCH" 2>/dev/null || true
 
-# ## NEW: Trap to copy partial results on job cancellation or timeout.
+# ## NEW: Trap to salvage partial results on cancellation, walltime kill, or internal
+# ## NEW: failure — but NOT on normal success (the explicit rsync-back handles that).
 cleanup_scratch() {{
-    echo "Signal received — copying partial results from scratch..."
+    trap - SIGTERM SIGINT ERR   ## NEW: disarm so cleanup failures don't re-enter the trap
+    echo "Job interrupted or failed — attempting to salvage partial results from scratch..."
     if [ -d "$SCRATCH_OUTPUT" ]; then
-        rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/ 2>/dev/null || true
-        echo "Partial results copied to: $OUTPUT_DIR"
+        rsync -a "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/ 2>/dev/null || true
+        echo "Partial results (if any) copied to: $OUTPUT_DIR"
     fi
 }}
-trap cleanup_scratch SIGTERM SIGINT EXIT
+# ## NEW: Register on termination signals and ERR, but not EXIT (which fires on success too).
+trap cleanup_scratch SIGTERM SIGINT ERR
 """
         scratch_copy_inputs_block = """
 # ## NEW: Copy validated FASTA inputs to scratch before running OrthoFinder.
@@ -139,15 +176,32 @@ if [ $EXIT_CODE -eq 0 ]; then
     mkdir -p "$OUTPUT_DIR"
     rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/
     echo "Results copied to: $OUTPUT_DIR"
+else
+    # ## NEW: OrthoFinder crashed — the set +e wrapper captured the failure, so the
+    # ## NEW: ERR trap does not fire here. Salvage partial results explicitly.
+    echo "OrthoFinder exited nonzero ($EXIT_CODE) — salvaging partial results from scratch..."
+    cleanup_scratch
 fi
 """
-        scratch_cleanup_block = """
-# ## NEW: Clean up scratch after a successful result copy.
-# Clean up scratch
+        # ## NEW: Cleanup depends on scratch type.
+        # Ephemeral (node-local) scratch is reclaimed on job exit, so removal is
+        # best-effort and must not fail an otherwise-successful job under set -e.
+        # Persistent shared scratch is managed by the cluster's purge policy and
+        # typically cannot (and should not) be removed by the user, so we only
+        # leave an informational message and never attempt an rm.
+        if config.slurm.is_ephemeral_scratch:
+            scratch_cleanup_block = """
+# ## NEW: Clean up ephemeral scratch (best-effort — node-local space is reclaimed on job exit regardless)
 if [ -d "$JOB_SCRATCH" ]; then
-    echo "Cleaning up scratch directory: $JOB_SCRATCH"
-    rm -rf "$JOB_SCRATCH"
+    echo "Cleaning up ephemeral scratch: $JOB_SCRATCH"
+    rm -rf "$JOB_SCRATCH" || echo "WARNING: could not remove $JOB_SCRATCH (non-fatal; node will reclaim it)"
 fi
+"""
+        else:
+            scratch_cleanup_block = """
+# ## NEW: Persistent scratch — do not delete. Cluster purge policy reclaims this space automatically.
+echo "Scratch results left in: $JOB_SCRATCH"
+echo "This is persistent scratch and will be removed by the cluster's purge policy. No manual cleanup needed."
 """
 
     sbatch_block = "\n".join(sbatch_lines)

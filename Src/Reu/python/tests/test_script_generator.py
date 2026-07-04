@@ -262,7 +262,10 @@ class TestGenerateOrthoFinderScript:
 
         script = generate_orthofinder_script(config)
 
-        assert 'JOB_SCRATCH="/share/ceph/scratch/testuser/${SLURM_JOB_ID}"' in script
+        # The preferred base is baked in, but JOB_SCRATCH derives from the
+        # runtime-resolved base so the script can self-heal / fall back.
+        assert 'PREFERRED_SCRATCH="/share/ceph/scratch/testuser"' in script
+        assert 'JOB_SCRATCH="$SCRATCH_BASE/${SLURM_JOB_ID}"' in script
         assert "SCRATCH_INPUT=" in script
         assert "SCRATCH_OUTPUT=" in script
         assert "export TMPDIR=" in script
@@ -272,7 +275,7 @@ class TestGenerateOrthoFinderScript:
         assert 'orthofinder \\\n  -f "$EFFECTIVE_INPUT" \\\n  -o "$EFFECTIVE_OUTPUT"' in script
         assert "orthofinder -f /share/ceph/project/Data/interim/cleaned_proteomes" not in script
 
-    def test_scratch_cleanup_present(self, sample_runtime):
+    def test_scratch_runtime_resolver_present(self, sample_runtime):
         config = PipelineConfig(
             project_dir="/share/ceph/project",
             conda_env="convgeno",
@@ -286,7 +289,165 @@ class TestGenerateOrthoFinderScript:
 
         script = generate_orthofinder_script(config)
 
+        # Self-healing resolver: chmod u+w when owned-but-unwritable, real
+        # write probe, then fall back to /tmp/scratch.
+        assert "resolve_scratch_base()" in script
+        assert "chmod u+w" in script
+        assert ".convgeno_wtest" in script
+        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+        assert 'SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"' in script
+
+    def test_scratch_resolver_absent_without_scratch(
+        self, sample_config: PipelineConfig
+    ):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "resolve_scratch_base" not in script
+        assert "PREFERRED_SCRATCH" not in script
+        assert "chmod u+w" not in script
+
+    def test_scratch_cleanup_present(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
         assert 'rm -rf "$JOB_SCRATCH"' in script
+
+    def test_ephemeral_scratch_cleanup_is_nonfatal(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/tmp/scratch",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert "Cleaning up ephemeral scratch" in script
+        assert 'rm -rf "$JOB_SCRATCH"' in script
+        # The failed rm must not propagate a non-zero exit under set -euo pipefail.
+        rm_line = next(
+            line for line in script.splitlines() if 'rm -rf "$JOB_SCRATCH"' in line
+        )
+        assert "||" in rm_line
+        assert "WARNING" in script
+
+    def test_persistent_scratch_no_rm(self, sample_runtime):
+        config = PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+                is_ephemeral_scratch=False,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+        script = generate_orthofinder_script(config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' not in script
+        assert "purge policy" in script
+        assert "No manual cleanup needed" in script
+
+    def test_no_scratch_no_cleanup_block(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert 'rm -rf "$JOB_SCRATCH"' not in script
+        assert "purge policy" not in script
+
+    def _scratch_config(self, sample_runtime):
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            conda_env="convgeno",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/share/ceph/scratch/testuser",
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out"),
+            runtime=sample_runtime,
+        )
+
+    def _trap_registration_line(self, script: str) -> str:
+        return next(
+            line
+            for line in script.splitlines()
+            if line.strip().startswith("trap cleanup_scratch")
+        )
+
+    def test_trap_registered_on_signals_and_err(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        trap_line = self._trap_registration_line(script)
+        assert "SIGTERM" in trap_line
+        assert "SIGINT" in trap_line
+        assert "ERR" in trap_line
+
+    def test_trap_excludes_exit(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        trap_line = self._trap_registration_line(script)
+        assert "EXIT" not in trap_line
+
+    def test_cleanup_disarms_trap(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        assert "trap - " in script
+
+    def test_cleanup_rsync_nonfatal(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        rsync_line = next(
+            line
+            for line in script.splitlines()
+            if "rsync -a" in line and "$SCRATCH_OUTPUT" in line
+        )
+        assert "|| true" in rsync_line
+
+    def test_cleanup_message_updated(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        assert "salvage partial results" in script
+        assert "Signal received — copying partial results from scratch..." not in script
+
+    def test_no_scratch_no_trap(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "trap cleanup_scratch" not in script
+        assert "cleanup_scratch()" not in script
+
+    def test_orthofinder_failure_salvages_partial_results(self, sample_runtime):
+        script = generate_orthofinder_script(self._scratch_config(sample_runtime))
+
+        # The rsync-back conditional must have an else branch that salvages
+        # partial results when OrthoFinder exits nonzero (captured by set +e,
+        # so the ERR trap never fires for it).
+        back_start = script.index("if [ $EXIT_CODE -eq 0 ]; then")
+        back_end = script.index("\nfi", back_start)
+        rsync_back_block = script[back_start:back_end]
+        assert "\nelse\n" in rsync_back_block
+        assert "cleanup_scratch" in rsync_back_block
+
+    def test_no_scratch_no_failure_salvage(self, sample_config: PipelineConfig):
+        script = generate_orthofinder_script(sample_config)
+
+        assert "salvaging partial results from scratch" not in script
 
     def test_effective_paths_without_scratch(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)
