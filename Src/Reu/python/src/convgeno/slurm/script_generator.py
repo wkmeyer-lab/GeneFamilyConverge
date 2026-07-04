@@ -148,15 +148,18 @@ export TMP="$SCRATCH_TMP"
 echo "Using scratch directory: $JOB_SCRATCH"
 df -h "$JOB_SCRATCH" 2>/dev/null || true
 
-# ## NEW: Trap to copy partial results on job cancellation or timeout.
+# ## NEW: Trap to salvage partial results on cancellation, walltime kill, or internal
+# ## NEW: failure — but NOT on normal success (the explicit rsync-back handles that).
 cleanup_scratch() {{
-    echo "Signal received — copying partial results from scratch..."
+    trap - SIGTERM SIGINT ERR   ## NEW: disarm so cleanup failures don't re-enter the trap
+    echo "Job interrupted or failed — attempting to salvage partial results from scratch..."
     if [ -d "$SCRATCH_OUTPUT" ]; then
-        rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/ 2>/dev/null || true
-        echo "Partial results copied to: $OUTPUT_DIR"
+        rsync -a "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/ 2>/dev/null || true
+        echo "Partial results (if any) copied to: $OUTPUT_DIR"
     fi
 }}
-trap cleanup_scratch SIGTERM SIGINT EXIT
+# ## NEW: Register on termination signals and ERR, but not EXIT (which fires on success too).
+trap cleanup_scratch SIGTERM SIGINT ERR
 """
         scratch_copy_inputs_block = """
 # ## NEW: Copy validated FASTA inputs to scratch before running OrthoFinder.
@@ -173,6 +176,11 @@ if [ $EXIT_CODE -eq 0 ]; then
     mkdir -p "$OUTPUT_DIR"
     rsync -a --info=progress2 "$SCRATCH_OUTPUT"/ "$OUTPUT_DIR"/
     echo "Results copied to: $OUTPUT_DIR"
+else
+    # ## NEW: OrthoFinder crashed — the set +e wrapper captured the failure, so the
+    # ## NEW: ERR trap does not fire here. Salvage partial results explicitly.
+    echo "OrthoFinder exited nonzero ($EXIT_CODE) — salvaging partial results from scratch..."
+    cleanup_scratch
 fi
 """
         # ## NEW: Cleanup depends on scratch type.
