@@ -79,6 +79,7 @@ renv/staging/
 *.swo
 *~
 .cursor/
+.claude/
 
 # --- Pipeline data (see Data/README.md) ---
 # Track manifests/ and .gitkeep placeholders; ignore generated/large files.
