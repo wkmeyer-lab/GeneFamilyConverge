@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Always-loaded rules** live in `.claude/rules/`. See
+> `.claude/rules/orthofinder-cafe5-docs.md` (mandatory Context7 doc-pull for any
+> OrthoFinder/CAFE5 work).
+
 ## Project
 
 Pipeline for characterizing gene family copy number across species and associating
