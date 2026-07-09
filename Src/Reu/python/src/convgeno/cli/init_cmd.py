@@ -59,26 +59,6 @@ def _prompt_int(message: str, default: int) -> int:
     return value
 
 
-def _prompt_optional_int(message: str, default: int | None = None) -> int | None:
-    """Prompt for an optional integer value.
-
-    Returns *default* if the user presses Enter, ``None`` if they type
-    nothing and *default* is ``None``.
-    """
-    if default is not None:
-        prompt_str = f"{message} [{default}]: "
-    else:
-        prompt_str = f"{message} (press Enter to skip): "
-    raw = input(prompt_str).strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        print("  Please enter a valid integer.")
-        return _prompt_optional_int(message, default)
-
-
 def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
     """Derive OrthoFinder search and analysis thread counts."""
     if recommended_physical <= 0:
@@ -302,19 +282,6 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     account = normalize_optional_account(
         _prompt_optional("SLURM allocation/project account [optional, press Enter to omit]")
     )
-    open_file_limit = _prompt_optional_int(
-        "Maximum open files per job [optional, default 8192; press Enter to use default]",
-        default=8192,
-    )
-    print(
-        "  Lower analysis threads reduce open-file/shared-memory pressure "
-        "during large OrthoFinder resume jobs."
-    )
-    print(
-        "  Set orthofinder.analysis_threads in the config to override the "
-        "auto-selected value."
-    )
-
     slurm = SlurmConfig(
         partition=partition_name,
         time_limit=time_limit,
@@ -323,7 +290,6 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         mem_per_cpu=None,
         mail_user=mail_user,
         account=account,
-        open_file_limit=open_file_limit,
         scratch_dir=str(scratch_base) if scratch_base is not None else None,
         is_ephemeral_scratch=is_ephemeral_scratch,
     )
@@ -395,7 +361,6 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     if mail_user is not None:
         print(f"  Mail user:          {mail_user}")
     print(f"  SLURM account:      {account if account is not None else 'omitted'}")
-    print(f"  Open-file limit:    {open_file_limit if open_file_limit is not None else 'not set'}")
     print(f"  Scratch directory:  {scratch_base if scratch_base is not None else 'not set'}")
     print(f"  OrthoFinder -t:     {search_threads}")
     print(f"  OrthoFinder -a:     {analysis_threads}")

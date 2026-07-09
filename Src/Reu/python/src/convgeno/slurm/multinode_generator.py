@@ -81,27 +81,6 @@ def _build_sbatch_header(config: PipelineConfig, overrides: dict) -> str:
     return "\n".join(formatted)
 
 
-def choose_analysis_threads(cpus_per_task: int, open_file_limit: int | None) -> int:
-    """Pick a conservative ``-a`` value for the OrthoFinder resume phase.
-
-    Called only when ``orthofinder.analysis_threads`` is ``None`` (auto).
-    Higher analysis-thread counts open more shared-memory segments and
-    temp files; on clusters with tight ``ulimit -n`` this causes
-    ``OSError: [Errno 24] Too many open files``.
-    """
-    cpu_cap = max(1, cpus_per_task)
-
-    if open_file_limit is None:
-        return min(2, cpu_cap)
-    if open_file_limit < 4096:
-        return 1
-    if open_file_limit < 8192:
-        return min(2, cpu_cap)
-    if open_file_limit < 16384:
-        return min(4, cpu_cap)
-    return min(8, cpu_cap)
-
-
 def _validate_has_orthofinder(config: PipelineConfig) -> None:
     if config.orthofinder is None:
         raise ValueError(
@@ -436,13 +415,14 @@ def generate_resume_script(
 
     The generated script:
 
-    * Attempts to raise the open-file limit via ``ulimit -n`` (wrapped
-      in ``if`` so ``set -e`` does not abort if the kernel refuses).
     * Sets ``TMPDIR`` to a project-local temp directory to avoid filling
       ``/dev/shm`` or ``/tmp``.
     * Cleans up ``$TMPDIR`` on success, preserves it on failure.
-    * Uses either the user-specified ``analysis_threads`` or a value
-      derived from :func:`choose_analysis_threads`.
+    * Uses ``orthofinder.analysis_threads`` for ``-a`` (falling back to 1
+      when unset).
+
+    NOTE: open-file-limit handling was removed from this script; the fd
+    feasibility gate is reintroduced as a separate step.
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None
@@ -461,37 +441,16 @@ def generate_resume_script(
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
-    # Resolve analysis threads: explicit value or heuristic.
+    # Resolve analysis threads (-a): use the configured value, falling back
+    # to 1 when unset. The open-file-limit-driven auto-heuristic was removed;
+    # the fd feasibility gate (a later step) will own fd sizing.
     if config.orthofinder.analysis_threads is not None:
         analysis_threads = config.orthofinder.analysis_threads
     else:
-        analysis_threads = choose_analysis_threads(
-            config.slurm.cpus_per_task,
-            config.slurm.open_file_limit,
-        )
+        analysis_threads = 1
 
     extra = " ".join(config.orthofinder.extra_args)
     extra_suffix = f" {extra}" if extra else ""
-
-    # Build the ulimit block.  If no limit is configured, just print
-    # the current value; otherwise try to raise it.
-    open_file_limit = config.slurm.open_file_limit
-    if open_file_limit is not None:
-        ulimit_block = f"""\
-REQUESTED_OPEN_FILE_LIMIT="{open_file_limit}"
-
-echo "Open-file limit before adjustment: $(ulimit -n || echo unknown)"
-
-if ulimit -n "$REQUESTED_OPEN_FILE_LIMIT" 2>/dev/null; then
-    echo "Open-file limit raised to: $(ulimit -n)"
-else
-    echo "WARNING: Could not raise open-file limit to $REQUESTED_OPEN_FILE_LIMIT."
-    echo "Continuing with current open-file limit: $(ulimit -n || echo unknown)"
-fi"""
-    else:
-        ulimit_block = """\
-echo "Open-file limit (current): $(ulimit -n || echo unknown)"
-"""
 
     script = f"""\
 #!/bin/bash
@@ -514,9 +473,6 @@ echo "Start:     $(date)"
 echo "============================================================"
 
 START_SECONDS=$SECONDS
-
-# ---- Open-file limit ----
-{ulimit_block}
 
 OUTPUT_DIR="{config.orthofinder.output_dir}"
 OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
