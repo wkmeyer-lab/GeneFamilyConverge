@@ -232,6 +232,49 @@ fi
 
 echo "$WORK_DIR" > "$WORK_DIR_FILE"
 
+# ------------------------------------------------------------
+# Detect how THIS OrthoFinder build handled the search databases.
+# Some builds create the DIAMOND/BLAST databases themselves during -op and
+# emit only the search (blastp) commands; others emit the DB-build
+# (makedb/makeblastdb) commands for us to run. A later prepare step must
+# build the databases when -- and only when -- OrthoFinder did not. The
+# -op run above IS the probe (it never runs the searches), so no separate
+# throwaway run is needed; we simply inspect what -op produced.
+# ------------------------------------------------------------
+DB_MODE_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_db_mode.txt"
+
+DB_BUILD_COMMAND_COUNT=$(grep -Ec 'makedb|makeblastdb' "$COMMANDS_FILE" || true)
+DB_FILE_COUNT=$(find "$WORK_DIR" -maxdepth 2 \\( -name '*.dmnd' -o -name '*.phr' -o -name '*.pin' -o -name '*.psq' \\) 2>/dev/null | wc -l)
+
+echo ""
+echo "---- Detecting OrthoFinder database-build behavior ----"
+echo "DB-build commands emitted by -op:  $DB_BUILD_COMMAND_COUNT"
+echo "Prebuilt DB files already present: $DB_FILE_COUNT"
+
+if [ "$DB_BUILD_COMMAND_COUNT" -gt 0 ]; then
+    OF_DB_MODE="emit_build_commands"
+    echo "Detected DB mode: EMIT_BUILD_COMMANDS"
+    echo "  This OrthoFinder build does NOT create the search databases itself; it emitted"
+    echo "  $DB_BUILD_COMMAND_COUNT database-build command(s). A later prepare step will run"
+    echo "  them before the search array starts."
+elif [ "$DB_FILE_COUNT" -gt 0 ]; then
+    OF_DB_MODE="self_built"
+    echo "Detected DB mode: SELF_BUILT"
+    echo "  -op already created $DB_FILE_COUNT search-database file(s) in the WorkingDirectory;"
+    echo "  no database-build step is needed."
+else
+    echo "ERROR: Could not determine how OrthoFinder handled the search databases." >&2
+    echo "  No makedb/makeblastdb build commands were emitted, and no" >&2
+    echo "  *.dmnd/*.phr/*.pin/*.psq database files were found under:" >&2
+    echo "  $WORK_DIR" >&2
+    echo "  Prepare log: $PREPARE_LOG" >&2
+    exit 1
+fi
+
+echo "$OF_DB_MODE" > "$DB_MODE_FILE"
+echo "Wrote DB mode to: $DB_MODE_FILE"
+echo "-------------------------------------------------------"
+
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
 MINUTES=$(( (ELAPSED % 3600) / 60 ))

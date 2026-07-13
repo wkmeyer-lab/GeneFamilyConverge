@@ -156,6 +156,53 @@ class TestPrepareScript:
         assert "sed 's/^[[:space:]]*//'" in script
 
 
+class TestPrepareDbModeDetection:
+    """Prepare must detect, on the user's cluster, whether this OrthoFinder
+    build creates the search databases itself during -op or only emits the
+    build commands, then persist that decision for later steps."""
+
+    def test_detects_and_persists_db_mode(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert 'DB_MODE_FILE="$OUTPUT_PARENT/${RUN_NAME}_db_mode.txt"' in script
+        assert 'echo "$OF_DB_MODE" > "$DB_MODE_FILE"' in script
+
+    def test_uses_two_independent_signals(self, sample_config):
+        # (1) build commands emitted by -op, and (2) DB files already present.
+        script = generate_prepare_script(sample_config)
+        assert "grep -Ec 'makedb|makeblastdb'" in script
+        assert "-name '*.dmnd'" in script
+        assert "-name '*.phr'" in script
+
+    def test_emit_build_commands_branch(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert 'OF_DB_MODE="emit_build_commands"' in script
+        assert '[ "$DB_BUILD_COMMAND_COUNT" -gt 0 ]' in script
+
+    def test_self_built_branch(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert 'OF_DB_MODE="self_built"' in script
+        assert '[ "$DB_FILE_COUNT" -gt 0 ]' in script
+
+    def test_fails_fast_when_mode_undeterminable(self, sample_config):
+        # Neither build commands nor DB files found -> abort with a clear
+        # diagnostic rather than guessing.
+        script = generate_prepare_script(sample_config)
+        assert (
+            "Could not determine how OrthoFinder handled the search databases"
+            in script
+        )
+        idx_err = script.index("Could not determine how OrthoFinder handled")
+        assert "exit 1" in script[idx_err:]
+
+    def test_detection_runs_after_workdir_located(self, sample_config):
+        # The DB-file check needs $WORK_DIR, so detection must come after the
+        # WorkingDirectory is located and its pointer written.
+        script = generate_prepare_script(sample_config)
+        assert script.index('echo "$WORK_DIR" > "$WORK_DIR_FILE"') < script.index(
+            "OF_DB_MODE="
+        )
+
+
 class TestCommandExtractionRegex:
     """End-to-end test that actually runs the prepare-script regex against
     synthetic OrthoFinder output. String-matching the script source can't
