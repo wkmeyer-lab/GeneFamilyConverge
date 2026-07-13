@@ -238,14 +238,21 @@ class TestPrepareCompleteness:
         # exactly n build commands, each executed
         assert '[ "$DB_BUILD_COUNT" -ne "$N_SPECIES" ]' in script
         assert 'eval "$BUILD_CMD"' in script
-        # after building, DIAMOND DBs must equal n
-        assert '[ "$DMND_COUNT" -ne "$N_SPECIES" ]' in script
+        # after building, each species DB must be present (missing -> abort)
+        assert '[ "$MISSING_DBS" -gt 0 ]' in script
 
-    def test_verifies_n_diamond_dbs_exist(self, sample_config):
-        # sample_config uses diamond -> the .dmnd count is checked against n.
+    def test_verifies_each_species_db_exists_top_level(self, sample_config):
+        # Per-species existence check at the top level; the dependencies/
+        # self-test DB (a subdir) must be ignored. Regression for the first
+        # cluster run that aborted on 115 vs 114 (find -maxdepth 2 swept up
+        # WorkingDirectory/dependencies/diamondDBSpecies0.dmnd).
         script = generate_prepare_script(sample_config)
-        assert "DMND_COUNT=$(find" in script
-        assert "-name '*.dmnd'" in script
+        assert "for SPECIES_ID in $(grep -oE '^[0-9]+'" in script
+        assert "diamondDBSpecies${SPECIES_ID}.dmnd" in script
+        assert '[ "$MISSING_DBS" -gt 0 ]' in script
+        # detection counts DB files at maxdepth 1, never descending into
+        # dependencies/.
+        assert 'DB_FILE_COUNT=$(find "$WORK_DIR" -maxdepth 1' in script
 
 
 class TestPrepareResourceDerivation:

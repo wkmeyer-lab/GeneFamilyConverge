@@ -380,7 +380,9 @@ grep -E 'makedb|makeblastdb' "$COMMANDS_FILE" > "$DB_BUILD_COMMANDS_FILE" || tru
 grep -Ev 'makedb|makeblastdb' "$COMMANDS_FILE" > "$SEARCH_COMMANDS_FILE" || true
 DB_BUILD_COUNT=$(wc -l < "$DB_BUILD_COMMANDS_FILE")
 SEARCH_COUNT=$(wc -l < "$SEARCH_COMMANDS_FILE")
-DB_FILE_COUNT=$(find "$WORK_DIR" -maxdepth 2 \\( -name '*.dmnd' -o -name '*.phr' -o -name '*.pin' -o -name '*.psq' \\) 2>/dev/null | wc -l)
+# maxdepth 1 only: OrthoFinder's startup self-test leaves a throwaway test DB
+# under $WORK_DIR/dependencies/, which must never be counted as a species DB.
+DB_FILE_COUNT=$(find "$WORK_DIR" -maxdepth 1 \\( -name '*.dmnd' -o -name '*.phr' -o -name '*.pin' -o -name '*.psq' \\) 2>/dev/null | wc -l)
 
 echo ""
 echo "---- OrthoFinder DB behaviour + completeness ----"
@@ -439,19 +441,29 @@ if [ "$OF_DB_MODE" = "emit_build_commands" ]; then
     fi
 fi
 
-# (3) Verify the databases now exist -- one per species.
+# (3) Verify the databases now exist -- one per species, at the TOP LEVEL of
+# the WorkingDirectory. Check each species' DB by name (maxdepth 1): the real
+# per-species DBs live directly in the WorkingDirectory, while OrthoFinder's
+# startup self-test leaves a throwaway test DB under $WORK_DIR/dependencies/
+# that must be ignored.
 if [ "$SEARCH_PROGRAM" = "diamond" ]; then
-    DMND_COUNT=$(find "$WORK_DIR" -maxdepth 2 -name '*.dmnd' 2>/dev/null | wc -l)
-    if [ "$DMND_COUNT" -ne "$N_SPECIES" ]; then
-        echo "ERROR: Expected $N_SPECIES DIAMOND databases (*.dmnd) but found $DMND_COUNT" >&2
-        echo "  in $WORK_DIR. Aborting. See $PREPARE_LOG." >&2
+    MISSING_DBS=0
+    for SPECIES_ID in $(grep -oE '^[0-9]+' "$SPECIES_IDS_FILE" || true); do
+        if [ ! -f "$WORK_DIR/diamondDBSpecies${{SPECIES_ID}}.dmnd" ]; then
+            echo "ERROR: Missing DIAMOND database: diamondDBSpecies${{SPECIES_ID}}.dmnd" >&2
+            MISSING_DBS=$(( MISSING_DBS + 1 ))
+        fi
+    done
+    if [ "$MISSING_DBS" -gt 0 ]; then
+        echo "ERROR: $MISSING_DBS of $N_SPECIES DIAMOND databases missing" >&2
+        echo "  (top-level diamondDBSpecies<id>.dmnd in $WORK_DIR). Aborting. See $PREPARE_LOG." >&2
         exit 1
     fi
-    echo "Verified $DMND_COUNT DIAMOND databases (one per species)."
+    echo "Verified $N_SPECIES DIAMOND databases (per-species, top-level)."
 else
-    OTHER_DB_COUNT=$(find "$WORK_DIR" -maxdepth 2 \\( -name '*.phr' -o -name '*.pin' -o -name '*.psq' -o -name '*.pdb' \\) 2>/dev/null | wc -l)
+    OTHER_DB_COUNT=$(find "$WORK_DIR" -maxdepth 1 \\( -name '*.phr' -o -name '*.pin' -o -name '*.psq' -o -name '*.pdb' \\) 2>/dev/null | wc -l)
     if [ "$OTHER_DB_COUNT" -lt 1 ]; then
-        echo "ERROR: No search databases found in $WORK_DIR for program '$SEARCH_PROGRAM'." >&2
+        echo "ERROR: No search databases found (top-level) in $WORK_DIR for '$SEARCH_PROGRAM'." >&2
         exit 1
     fi
     echo "Verified search databases present ($OTHER_DB_COUNT files) for '$SEARCH_PROGRAM'."
