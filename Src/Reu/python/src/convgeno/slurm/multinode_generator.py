@@ -233,35 +233,56 @@ fi
 echo "$WORK_DIR" > "$WORK_DIR_FILE"
 
 # ------------------------------------------------------------
-# Detect how THIS OrthoFinder build handled the search databases.
-# Some builds create the DIAMOND/BLAST databases themselves during -op and
-# emit only the search (blastp) commands; others emit the DB-build
-# (makedb/makeblastdb) commands for us to run. A later prepare step must
-# build the databases when -- and only when -- OrthoFinder did not. The
-# -op run above IS the probe (it never runs the searches), so no separate
-# throwaway run is needed; we simply inspect what -op produced.
+# Detect the OrthoFinder database-build behaviour, split the emitted
+# commands, and verify completeness (databases = n, searches = n^2).
+#
+# Some OrthoFinder builds create the DIAMOND/BLAST databases themselves
+# during -op and emit only the search (blastp) commands; others emit the
+# DB-build (makedb/makeblastdb) commands for us to run. The -op run above
+# IS the probe (it never runs the searches), so we inspect what it produced
+# -- no separate throwaway run is needed.
 # ------------------------------------------------------------
 DB_MODE_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_db_mode.txt"
+DB_BUILD_COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_db_build_commands.txt"
+SEARCH_COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_search_commands.txt"
+SPECIES_IDS_FILE="$WORK_DIR/SpeciesIDs.txt"
 
-DB_BUILD_COMMAND_COUNT=$(grep -Ec 'makedb|makeblastdb' "$COMMANDS_FILE" || true)
+# Ground truth for completeness: one active line per species in
+# SpeciesIDs.txt (removed species are commented with '#' and excluded).
+if [ ! -f "$SPECIES_IDS_FILE" ]; then
+    echo "ERROR: SpeciesIDs.txt not found: $SPECIES_IDS_FILE" >&2
+    exit 1
+fi
+N_SPECIES=$(grep -cE '^[0-9]+:' "$SPECIES_IDS_FILE" || true)
+if [ "$N_SPECIES" -lt 1 ]; then
+    echo "ERROR: Could not read a species count from $SPECIES_IDS_FILE" >&2
+    exit 1
+fi
+EXPECTED_SEARCHES=$(( N_SPECIES * N_SPECIES ))
+
+# Split the extracted commands: DB-build (makedb/makeblastdb) vs search
+# (blastp). The search array consumes SEARCH_COMMANDS_FILE (blastp only), so
+# it never re-runs makedb and its length is exactly n^2.
+grep -E 'makedb|makeblastdb' "$COMMANDS_FILE" > "$DB_BUILD_COMMANDS_FILE" || true
+grep -Ev 'makedb|makeblastdb' "$COMMANDS_FILE" > "$SEARCH_COMMANDS_FILE" || true
+DB_BUILD_COUNT=$(wc -l < "$DB_BUILD_COMMANDS_FILE")
+SEARCH_COUNT=$(wc -l < "$SEARCH_COMMANDS_FILE")
 DB_FILE_COUNT=$(find "$WORK_DIR" -maxdepth 2 \\( -name '*.dmnd' -o -name '*.phr' -o -name '*.pin' -o -name '*.psq' \\) 2>/dev/null | wc -l)
 
 echo ""
-echo "---- Detecting OrthoFinder database-build behavior ----"
-echo "DB-build commands emitted by -op:  $DB_BUILD_COMMAND_COUNT"
-echo "Prebuilt DB files already present: $DB_FILE_COUNT"
+echo "---- OrthoFinder DB behaviour + completeness ----"
+echo "Species (n):               $N_SPECIES"
+echo "DB-build commands emitted: $DB_BUILD_COUNT"
+echo "Prebuilt DB files present: $DB_FILE_COUNT"
+echo "Search (blastp) commands:  $SEARCH_COUNT  (expected n^2 = $EXPECTED_SEARCHES)"
 
-if [ "$DB_BUILD_COMMAND_COUNT" -gt 0 ]; then
+# Determine the DB mode from two independent signals.
+if [ "$DB_BUILD_COUNT" -gt 0 ]; then
     OF_DB_MODE="emit_build_commands"
-    echo "Detected DB mode: EMIT_BUILD_COMMANDS"
-    echo "  This OrthoFinder build does NOT create the search databases itself; it emitted"
-    echo "  $DB_BUILD_COMMAND_COUNT database-build command(s). A later prepare step will run"
-    echo "  them before the search array starts."
+    echo "Detected DB mode: EMIT_BUILD_COMMANDS (this build does not create the DBs itself)."
 elif [ "$DB_FILE_COUNT" -gt 0 ]; then
     OF_DB_MODE="self_built"
-    echo "Detected DB mode: SELF_BUILT"
-    echo "  -op already created $DB_FILE_COUNT search-database file(s) in the WorkingDirectory;"
-    echo "  no database-build step is needed."
+    echo "Detected DB mode: SELF_BUILT (-op already created the databases)."
 else
     echo "ERROR: Could not determine how OrthoFinder handled the search databases." >&2
     echo "  No makedb/makeblastdb build commands were emitted, and no" >&2
@@ -270,10 +291,61 @@ else
     echo "  Prepare log: $PREPARE_LOG" >&2
     exit 1
 fi
-
 echo "$OF_DB_MODE" > "$DB_MODE_FILE"
-echo "Wrote DB mode to: $DB_MODE_FILE"
-echo "-------------------------------------------------------"
+
+# (1) Searches must be exactly n^2 (all ordered species pairs, incl. self).
+if [ "$SEARCH_COUNT" -ne "$EXPECTED_SEARCHES" ]; then
+    echo "ERROR: Incomplete search list -- found $SEARCH_COUNT blastp commands," >&2
+    echo "  expected n^2 = $EXPECTED_SEARCHES for $N_SPECIES species." >&2
+    echo "  Proceeding would silently corrupt orthogroups; aborting. See $PREPARE_LOG." >&2
+    exit 1
+fi
+
+# (2) Databases: one per species (n). Build them here when OrthoFinder didn't.
+if [ "$OF_DB_MODE" = "emit_build_commands" ]; then
+    if [ "$DB_BUILD_COUNT" -ne "$N_SPECIES" ]; then
+        echo "ERROR: Expected $N_SPECIES database-build commands (one per species)," >&2
+        echo "  but found $DB_BUILD_COUNT. Aborting. See $PREPARE_LOG." >&2
+        exit 1
+    fi
+    echo "Building $DB_BUILD_COUNT search databases (one per species) on this node..."
+    DB_BUILD_FAILED=0
+    while IFS= read -r BUILD_CMD; do
+        if [ -z "$BUILD_CMD" ]; then
+            continue
+        fi
+        echo "[makedb] $BUILD_CMD"
+        if ! eval "$BUILD_CMD"; then
+            echo "WARNING: database-build command failed: $BUILD_CMD" >&2
+            DB_BUILD_FAILED=$(( DB_BUILD_FAILED + 1 ))
+        fi
+    done < "$DB_BUILD_COMMANDS_FILE"
+    if [ "$DB_BUILD_FAILED" -gt 0 ]; then
+        echo "ERROR: $DB_BUILD_FAILED database-build command(s) failed; aborting." >&2
+        exit 1
+    fi
+fi
+
+# (3) Verify the databases now exist -- one per species.
+if [ "$SEARCH_PROGRAM" = "diamond" ]; then
+    DMND_COUNT=$(find "$WORK_DIR" -maxdepth 2 -name '*.dmnd' 2>/dev/null | wc -l)
+    if [ "$DMND_COUNT" -ne "$N_SPECIES" ]; then
+        echo "ERROR: Expected $N_SPECIES DIAMOND databases (*.dmnd) but found $DMND_COUNT" >&2
+        echo "  in $WORK_DIR. Aborting. See $PREPARE_LOG." >&2
+        exit 1
+    fi
+    echo "Verified $DMND_COUNT DIAMOND databases (one per species)."
+else
+    OTHER_DB_COUNT=$(find "$WORK_DIR" -maxdepth 2 \\( -name '*.phr' -o -name '*.pin' -o -name '*.psq' -o -name '*.pdb' \\) 2>/dev/null | wc -l)
+    if [ "$OTHER_DB_COUNT" -lt 1 ]; then
+        echo "ERROR: No search databases found in $WORK_DIR for program '$SEARCH_PROGRAM'." >&2
+        exit 1
+    fi
+    echo "Verified search databases present ($OTHER_DB_COUNT files) for '$SEARCH_PROGRAM'."
+fi
+
+echo "Search commands (blastp only, n^2=$EXPECTED_SEARCHES) -> $SEARCH_COMMANDS_FILE"
+echo "-------------------------------------------------"
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -379,7 +451,9 @@ START_SECONDS=$SECONDS
 OUTPUT_DIR="{config.orthofinder.output_dir}"
 OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
 RUN_NAME="$(basename "$OUTPUT_DIR")"
-COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
+# Search array consumes the blastp-only command file written by prepare
+# (exactly n^2 lines); makedb was already run on the prepare node.
+COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_search_commands.txt"
 COMMANDS_PER_TASK={commands_per_task}
 
 if [ ! -f "$COMMANDS_FILE" ]; then

@@ -169,14 +169,14 @@ class TestPrepareDbModeDetection:
     def test_uses_two_independent_signals(self, sample_config):
         # (1) build commands emitted by -op, and (2) DB files already present.
         script = generate_prepare_script(sample_config)
-        assert "grep -Ec 'makedb|makeblastdb'" in script
+        assert "grep -E 'makedb|makeblastdb'" in script
+        assert "grep -Ev 'makedb|makeblastdb'" in script
         assert "-name '*.dmnd'" in script
-        assert "-name '*.phr'" in script
 
     def test_emit_build_commands_branch(self, sample_config):
         script = generate_prepare_script(sample_config)
         assert 'OF_DB_MODE="emit_build_commands"' in script
-        assert '[ "$DB_BUILD_COMMAND_COUNT" -gt 0 ]' in script
+        assert '[ "$DB_BUILD_COUNT" -gt 0 ]' in script
 
     def test_self_built_branch(self, sample_config):
         script = generate_prepare_script(sample_config)
@@ -201,6 +201,46 @@ class TestPrepareDbModeDetection:
         assert script.index('echo "$WORK_DIR" > "$WORK_DIR_FILE"') < script.index(
             "OF_DB_MODE="
         )
+
+
+class TestPrepareCompleteness:
+    """Prepare verifies n databases (one per species) and n^2 searches, and
+    builds the databases itself when OrthoFinder emitted the build commands."""
+
+    def test_reads_species_count_from_speciesids(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert 'SPECIES_IDS_FILE="$WORK_DIR/SpeciesIDs.txt"' in script
+        assert "grep -cE '^[0-9]+:'" in script
+
+    def test_expected_searches_is_n_squared(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert "EXPECTED_SEARCHES=$(( N_SPECIES * N_SPECIES ))" in script
+
+    def test_splits_into_search_and_db_build_files(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert "_search_commands.txt" in script
+        assert "_db_build_commands.txt" in script
+        assert "grep -Ev 'makedb|makeblastdb'" in script
+
+    def test_fails_when_search_count_not_n_squared(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        assert '[ "$SEARCH_COUNT" -ne "$EXPECTED_SEARCHES" ]' in script
+        idx = script.index('[ "$SEARCH_COUNT" -ne "$EXPECTED_SEARCHES" ]')
+        assert "exit 1" in script[idx:]
+
+    def test_builds_dbs_in_emit_mode_and_verifies_count(self, sample_config):
+        script = generate_prepare_script(sample_config)
+        # exactly n build commands, each executed
+        assert '[ "$DB_BUILD_COUNT" -ne "$N_SPECIES" ]' in script
+        assert 'eval "$BUILD_CMD"' in script
+        # after building, DIAMOND DBs must equal n
+        assert '[ "$DMND_COUNT" -ne "$N_SPECIES" ]' in script
+
+    def test_verifies_n_diamond_dbs_exist(self, sample_config):
+        # sample_config uses diamond -> the .dmnd count is checked against n.
+        script = generate_prepare_script(sample_config)
+        assert "DMND_COUNT=$(find" in script
+        assert "-name '*.dmnd'" in script
 
 
 class TestCommandExtractionRegex:
@@ -381,18 +421,19 @@ class TestSearchArrayScript:
         assert "--job-name=convgeno_of_search" in _search_script(sample_config)
 
     def test_reads_commands_file(self, sample_config):
-        assert "diamond_commands.txt" in _search_script(sample_config)
+        # Search consumes the blastp-only file prepare writes (not the raw
+        # extraction), so it never re-runs makedb.
+        assert "_search_commands.txt" in _search_script(sample_config)
 
     def test_reads_commands_from_parent_not_output_dir(self, sample_config):
-        # Must match the path prepare writes to. The previous bug had
-        # both prepare and search referencing $OUTPUT_DIR/diamond_commands.txt
-        # which fails on the prepare side.
+        # Must match the path prepare writes to, in $OUTPUT_PARENT (writing
+        # into $OUTPUT_DIR fails because OrthoFinder hasn't created it yet).
         script = _search_script(sample_config)
         assert (
-            'COMMANDS_FILE="$OUTPUT_PARENT/${RUN_NAME}_diamond_commands.txt"'
+            'COMMANDS_FILE="$OUTPUT_PARENT/${RUN_NAME}_search_commands.txt"'
             in script
         )
-        assert 'COMMANDS_FILE="$OUTPUT_DIR/diamond_commands.txt"' not in script
+        assert 'COMMANDS_FILE="$OUTPUT_DIR' not in script
 
     def test_uses_slurm_array_task_id(self, sample_config):
         assert "SLURM_ARRAY_TASK_ID" in _search_script(sample_config)
