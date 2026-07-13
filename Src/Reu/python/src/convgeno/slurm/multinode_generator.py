@@ -13,7 +13,9 @@ The multi-node mode splits OrthoFinder into three chained jobs:
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
+from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig, normalize_optional_account
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
@@ -103,6 +105,103 @@ def _resolve_runtime(
     return resolved
 
 
+# ============================================================
+# Prepare-phase resource derivation
+# ============================================================
+# Prepare parses every proteome and builds one search database per species,
+# so its cost scales with the TOTAL proteome volume, and its peak memory with
+# the LARGEST single proteome (diamond makedb loads one proteome at a time).
+# These are conservative, generalizable heuristics computed at generate time
+# from the input FASTA sizes -- not values fitted to any particular run.
+_PREPARE_CPU_CAP = 16
+_PREPARE_MEM_BASE_MB = 2048  # interpreter + OrthoFinder overhead
+_PREPARE_MEM_PER_TOTAL_MB = 2  # x total proteome MB (all-gene ID parsing)
+_PREPARE_MEM_PER_LARGEST_MB = 4  # x largest proteome MB (makedb peak)
+_PREPARE_MEM_FLOOR_MB = 4096
+_PREPARE_MEM_ROUND_MB = 1024
+_PREPARE_TIME_BASE_SEC = 600  # fixed startup / I/O overhead
+_PREPARE_TIME_PER_TOTAL_MB_SEC = 3
+_PREPARE_TIME_MARGIN = 1.5
+_PREPARE_TIME_MIN_SEC = 1800  # 30 min floor
+_PREPARE_TIME_MAX_SEC = 14400  # 4 h cap
+_PREPARE_FALLBACK_MEM_MB = _PREPARE_MEM_FLOOR_MB
+_PREPARE_FALLBACK_TIME = "02:00:00"
+
+_FASTA_EXTENSIONS = (".fa", ".fasta", ".faa")
+
+
+def _seconds_to_hms(seconds: int) -> str:
+    """Format whole seconds as SLURM ``HH:MM:SS``."""
+    return f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+
+
+def derive_prepare_cpus(cpus_per_task: int) -> int:
+    """Prepare CPU count = ``min(16, cores)``.
+
+    ``cpus_per_task`` is the configured per-node allocation, which ``init``
+    sets to (partition physical cores - 4). Prepare is a light parse+makedb
+    job, so it is capped at 16 cores (and uses fewer on small nodes) -- enough
+    for makedb without reserving a whole fat node, which keeps it easy to
+    backfill.
+    """
+    return min(_PREPARE_CPU_CAP, cpus_per_task)
+
+
+def derive_prepare_memory_mb(total_bytes: int, largest_bytes: int) -> int:
+    """Derive prepare memory (MB) from proteome volume.
+
+    Peak memory tracks the largest single proteome (makedb) plus a term for
+    OrthoFinder's all-gene ID parsing (total volume), over a base overhead;
+    floored and rounded up.
+    """
+    total_mb = total_bytes / (1024 * 1024)
+    largest_mb = largest_bytes / (1024 * 1024)
+    raw = (
+        _PREPARE_MEM_BASE_MB
+        + _PREPARE_MEM_PER_TOTAL_MB * total_mb
+        + _PREPARE_MEM_PER_LARGEST_MB * largest_mb
+    )
+    rounded = math.ceil(raw / _PREPARE_MEM_ROUND_MB) * _PREPARE_MEM_ROUND_MB
+    return max(_PREPARE_MEM_FLOOR_MB, int(rounded))
+
+
+def derive_prepare_walltime(total_bytes: int) -> str:
+    """Derive prepare walltime (HH:MM:SS) from total proteome volume.
+
+    Parsing all proteomes and building the databases scales with total
+    sequence volume; a safety margin is applied and the result clamped to a
+    sane [30 min, 4 h] range.
+    """
+    total_mb = total_bytes / (1024 * 1024)
+    seconds = _PREPARE_TIME_BASE_SEC + _PREPARE_TIME_PER_TOTAL_MB_SEC * total_mb
+    seconds = int(seconds * _PREPARE_TIME_MARGIN)
+    seconds = max(_PREPARE_TIME_MIN_SEC, min(_PREPARE_TIME_MAX_SEC, seconds))
+    return _seconds_to_hms(seconds)
+
+
+def _proteome_volume(input_dir: str) -> tuple[int, int, int]:
+    """Return ``(total_bytes, largest_bytes, n_files)`` for FASTA proteomes.
+
+    Returns ``(0, 0, 0)`` when the directory is absent or unreadable (e.g.
+    generating scripts off-cluster before the data is staged), so callers fall
+    back to safe defaults.
+    """
+    try:
+        directory = Path(input_dir)
+        if not directory.is_dir():
+            return (0, 0, 0)
+        sizes = [
+            entry.stat().st_size
+            for entry in directory.iterdir()
+            if entry.is_file() and entry.suffix.lower() in _FASTA_EXTENSIONS
+        ]
+    except OSError:
+        return (0, 0, 0)
+    if not sizes:
+        return (0, 0, 0)
+    return (sum(sizes), max(sizes), len(sizes))
+
+
 def generate_prepare_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
@@ -116,6 +215,18 @@ def generate_prepare_script(
     assert config.orthofinder is not None  # for type checker
     resolved_runtime = _resolve_runtime(config, runtime)
 
+    # Derive prepare resources from the proteome volume at generate time
+    # (SBATCH headers are static). Fall back to safe defaults when the inputs
+    # are not readable yet (e.g. generating off-cluster before data is staged).
+    prepare_cpus = derive_prepare_cpus(config.slurm.cpus_per_task)
+    total_bytes, largest_bytes, _ = _proteome_volume(config.orthofinder.input_dir)
+    if total_bytes > 0:
+        prepare_mem = f"{derive_prepare_memory_mb(total_bytes, largest_bytes)}M"
+        prepare_time = derive_prepare_walltime(total_bytes)
+    else:
+        prepare_mem = f"{_PREPARE_FALLBACK_MEM_MB}M"
+        prepare_time = _PREPARE_FALLBACK_TIME
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = _build_sbatch_header(
         config,
@@ -123,8 +234,10 @@ def generate_prepare_script(
             "--job-name": "convgeno_of_prepare",
             "--nodes": "1",
             "--ntasks": "1",
-            "--cpus-per-task": "4",
-            "--time": "02:00:00",
+            "--cpus-per-task": str(prepare_cpus),
+            "--time": prepare_time,
+            "--mem": prepare_mem,
+            "--mem-per-cpu": None,
         },
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)

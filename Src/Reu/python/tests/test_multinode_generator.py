@@ -18,6 +18,10 @@ from convgeno.slurm.config import PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX,
     COMMAND_LINE_REGEX_EXTRACT,
+    _proteome_volume,
+    derive_prepare_cpus,
+    derive_prepare_memory_mb,
+    derive_prepare_walltime,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
@@ -65,7 +69,8 @@ class TestPrepareScript:
     def test_single_node(self, sample_config):
         script = generate_prepare_script(sample_config)
         assert "--nodes=1" in script
-        assert "--cpus-per-task=4" in script
+        # CPU = min(16, cpus_per_task); sample_config has cpus_per_task=16.
+        assert "--cpus-per-task=16" in script
 
     def test_short_time_limit(self, sample_config):
         assert "--time=02:00:00" in generate_prepare_script(sample_config)
@@ -241,6 +246,76 @@ class TestPrepareCompleteness:
         script = generate_prepare_script(sample_config)
         assert "DMND_COUNT=$(find" in script
         assert "-name '*.dmnd'" in script
+
+
+class TestPrepareResourceDerivation:
+    """Prepare CPU/memory/walltime are derived, not hardcoded: CPU is capped
+    at min(16, cores); memory and walltime scale with proteome volume."""
+
+    def test_cpus_capped_at_16(self):
+        assert derive_prepare_cpus(44) == 16
+        assert derive_prepare_cpus(16) == 16
+
+    def test_cpus_uses_fewer_on_small_nodes(self):
+        assert derive_prepare_cpus(12) == 12
+
+    def test_memory_has_floor(self):
+        assert derive_prepare_memory_mb(0, 0) == 4096
+
+    def test_memory_scales_with_volume_and_rounds(self):
+        small = derive_prepare_memory_mb(100 * 1024 * 1024, 20 * 1024 * 1024)
+        large = derive_prepare_memory_mb(8000 * 1024 * 1024, 400 * 1024 * 1024)
+        assert large > small
+        assert large % 1024 == 0
+
+    def test_walltime_is_clamped(self):
+        assert derive_prepare_walltime(0) == "00:30:00"
+        assert derive_prepare_walltime(10**12) == "04:00:00"
+
+    def test_walltime_scales_with_volume(self):
+        small = derive_prepare_walltime(200 * 1024 * 1024)
+        large = derive_prepare_walltime(3000 * 1024 * 1024)
+        assert large >= small
+
+    def test_proteome_volume_reads_fasta_sizes(self, tmp_path):
+        (tmp_path / "a.faa").write_text(">x\n" + "M" * 100 + "\n")
+        (tmp_path / "b.fa").write_text(">y\n" + "M" * 300 + "\n")
+        (tmp_path / "notes.txt").write_text("ignore me")
+        total, largest, n = _proteome_volume(str(tmp_path))
+        assert n == 2
+        assert largest == (tmp_path / "b.fa").stat().st_size
+        assert total == (
+            (tmp_path / "a.faa").stat().st_size + (tmp_path / "b.fa").stat().st_size
+        )
+
+    def test_proteome_volume_missing_dir_returns_zero(self):
+        assert _proteome_volume("/no/such/dir/xyz") == (0, 0, 0)
+
+    def test_generator_embeds_derived_mem_and_time(self, tmp_path, sample_runtime):
+        for i in range(4):
+            (tmp_path / f"sp{i}.faa").write_text(">g\n" + "M" * 5000 + "\n")
+        total, largest, _ = _proteome_volume(str(tmp_path))
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu", cpus_per_task=48),
+            orthofinder=OrthoFinderConfig(
+                input_dir=str(tmp_path),
+                output_dir="/p/out/run",
+                search_threads=16,
+                analysis_threads=8,
+            ),
+            runtime=sample_runtime,
+        )
+        script = generate_prepare_script(cfg)
+        assert f"--mem={derive_prepare_memory_mb(total, largest)}M" in script
+        assert f"--time={derive_prepare_walltime(total)}" in script
+        assert "--cpus-per-task=16" in script  # min(16, 48)
+
+    def test_generator_falls_back_when_inputs_absent(self, sample_config):
+        # sample_config.input_dir does not exist -> fallback mem/time.
+        script = generate_prepare_script(sample_config)
+        assert "--mem=4096M" in script
+        assert "--time=02:00:00" in script
 
 
 class TestCommandExtractionRegex:
