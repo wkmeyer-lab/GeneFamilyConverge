@@ -488,84 +488,13 @@ class TestCommandExtractionRegex:
         assert "ACCEPTED" in result.stdout
 
 
-def _search_script(config, **kwargs):
-    """Helper: call generate_search_array_script with sensible defaults."""
-    kwargs.setdefault("commands_per_task", 50)
-    kwargs.setdefault("array_max", 99)
-    return generate_search_array_script(config, **kwargs)
+class TestSearchArrayStub:
+    """The v1 search array has been removed; the v2 generator is a hard stub
+    that raises NotImplementedError until the LPT/C-W-K-T sizing is built."""
 
-
-class TestSearchArrayScript:
-    def test_is_array_job(self, sample_config):
-        assert "--array=" in _search_script(sample_config)
-
-    def test_job_name(self, sample_config):
-        assert "--job-name=convgeno_of_search" in _search_script(sample_config)
-
-    def test_reads_commands_file(self, sample_config):
-        # Search consumes the blastp-only file prepare writes (not the raw
-        # extraction), so it never re-runs makedb.
-        assert "_search_commands.txt" in _search_script(sample_config)
-
-    def test_reads_commands_from_parent_not_output_dir(self, sample_config):
-        # Must match the path prepare writes to, in $OUTPUT_PARENT (writing
-        # into $OUTPUT_DIR fails because OrthoFinder hasn't created it yet).
-        script = _search_script(sample_config)
-        assert (
-            'COMMANDS_FILE="$OUTPUT_PARENT/${RUN_NAME}_search_commands.txt"'
-            in script
-        )
-        assert 'COMMANDS_FILE="$OUTPUT_DIR' not in script
-
-    def test_uses_slurm_array_task_id(self, sample_config):
-        assert "SLURM_ARRAY_TASK_ID" in _search_script(sample_config)
-
-    def test_exits_if_no_work(self, sample_config):
-        assert "exit 0" in _search_script(sample_config)
-
-    def test_counts_failures(self, sample_config):
-        assert "FAILED" in _search_script(sample_config)
-
-    def test_uses_search_threads(self, sample_config):
-        assert "--cpus-per-task=16" in _search_script(sample_config)
-
-    def test_custom_commands_per_task(self, sample_config):
-        script = _search_script(sample_config, commands_per_task=100)
-        assert "COMMANDS_PER_TASK=100" in script
-
-    def test_uses_computed_array_max(self, sample_config):
-        # The hardcoded 0-9999 was rejected by SLURM clusters with
-        # "Invalid job array specification". The array range must come
-        # from caller-supplied array_max.
-        script = generate_search_array_script(
-            sample_config, commands_per_task=50, array_max=259
-        )
-        assert "#SBATCH --array=0-259" in script
-        assert "#SBATCH --array=0-9999" not in script
-
-    def test_array_max_zero_is_valid_single_task(self, sample_config):
-        script = generate_search_array_script(
-            sample_config, commands_per_task=50, array_max=0
-        )
-        assert "#SBATCH --array=0-0" in script
-
-    def test_invalid_commands_per_task_raises(self, sample_config):
-        with pytest.raises(ValueError, match="commands_per_task"):
-            generate_search_array_script(
-                sample_config, commands_per_task=0, array_max=259
-            )
-
-    def test_invalid_array_max_raises(self, sample_config):
-        with pytest.raises(ValueError, match="array_max"):
-            generate_search_array_script(
-                sample_config, commands_per_task=50, array_max=-1
-            )
-
-    def test_missing_array_max_raises(self, sample_config):
-        with pytest.raises(ValueError, match="array_max"):
-            generate_search_array_script(
-                sample_config, commands_per_task=50, array_max=None
-            )
+    def test_raises_not_implemented(self, sample_config):
+        with pytest.raises(NotImplementedError, match="search array"):
+            generate_search_array_script(sample_config)
 
 
 class TestResumeScript:
@@ -602,9 +531,10 @@ class TestResumeScript:
 
 class TestCrossCutting:
     def _all_scripts(self, config):
+        # The search array is a v2 stub (raises), so cross-cutting checks cover
+        # the two generators that actually produce scripts.
         return [
             generate_prepare_script(config),
-            _search_script(config),
             generate_resume_script(config),
         ]
 
@@ -641,7 +571,7 @@ class TestCrossCutting:
         # design error (mkdir/redirect order, wrong flags) that string-
         # matching tests missed. At minimum, every generated script must
         # parse under `bash -n`.
-        names = ["prepare.sh", "search.sh", "resume.sh"]
+        names = ["prepare.sh", "resume.sh"]
         for name, script in zip(names, self._all_scripts(sample_config)):
             path = tmp_path / name
             path.write_text(script)
@@ -661,17 +591,14 @@ class TestCrossCutting:
             slurm=SlurmConfig(partition="hawkcpu"),
             runtime=sample_runtime,
         )
-        # The orthofinder-missing check fires before array_max validation
-        # in generate_search_array_script, so all three raise the same
-        # "OrthoFinder" error even if we pass valid array_max.
+        # prepare/resume validate the orthofinder block; the search array is a
+        # v2 stub that raises NotImplementedError regardless of config.
         with pytest.raises(ValueError, match="OrthoFinder"):
             generate_prepare_script(config)
         with pytest.raises(ValueError, match="OrthoFinder"):
-            generate_search_array_script(
-                config, commands_per_task=50, array_max=99
-            )
-        with pytest.raises(ValueError, match="OrthoFinder"):
             generate_resume_script(config)
+        with pytest.raises(NotImplementedError):
+            generate_search_array_script(config)
 
 
 class TestAccountOmissionInMultinodeScripts:
@@ -697,17 +624,15 @@ class TestAccountOmissionInMultinodeScripts:
 
     def test_multinode_scripts_omit_null_account(self, no_account_config):
         prepare = generate_prepare_script(no_account_config)
-        search = _search_script(no_account_config)
         resume = generate_resume_script(no_account_config)
-        for script in (prepare, search, resume):
+        for script in (prepare, resume):
             assert "--account" not in script
 
     def test_multinode_scripts_include_valid_account(self, sample_config):
         # sample_config has account="wym219"
         prepare = generate_prepare_script(sample_config)
-        search = _search_script(sample_config)
         resume = generate_resume_script(sample_config)
-        for script in (prepare, search, resume):
+        for script in (prepare, resume):
             assert "#SBATCH --account=wym219" in script
 
     @pytest.mark.parametrize("account", ["", "null", "None", "NULL"])
@@ -727,9 +652,8 @@ class TestAccountOmissionInMultinodeScripts:
             runtime=sample_runtime,
         )
         prepare = generate_prepare_script(config)
-        search = _search_script(config)
         resume = generate_resume_script(config)
-        for script in (prepare, search, resume):
+        for script in (prepare, resume):
             assert "--account" not in script
 
 
