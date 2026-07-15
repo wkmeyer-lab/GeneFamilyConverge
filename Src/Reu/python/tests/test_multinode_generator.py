@@ -26,6 +26,7 @@ from convgeno.slurm.multinode_generator import (
     derive_prepare_cpus,
     derive_prepare_memory_mb,
     derive_prepare_walltime,
+    derive_search_concurrency,
     derive_search_cpus,
     derive_search_cpus_from_discovery,
     generate_prepare_script,
@@ -1010,3 +1011,35 @@ class TestDeriveSearchCpus:
     def test_from_discovery_override_passes_through(self):
         node = {"min_cpus_per_node": 15, "max_cpus_per_node": 52}
         assert derive_search_cpus_from_discovery(node, override=4) == 4
+
+
+class TestDeriveSearchConcurrency:
+    """W = the array %W throttle: default 8, override wins, QOS MaxJobs caps."""
+
+    def test_default_is_eight(self):
+        assert derive_search_concurrency() == 8
+
+    def test_override_wins(self):
+        assert derive_search_concurrency(override=12) == 12
+
+    def test_override_below_one_raises(self):
+        with pytest.raises(ValueError, match="array_throttle override"):
+            derive_search_concurrency(override=0)
+
+    def test_qos_caps_below_default(self):
+        assert derive_search_concurrency(qos_max_jobs=3) == 3
+
+    def test_qos_above_default_has_no_effect(self):
+        assert derive_search_concurrency(qos_max_jobs=100) == 8
+
+    def test_qos_caps_the_override(self):
+        assert derive_search_concurrency(override=20, qos_max_jobs=5) == 5
+
+    def test_qos_of_one_forces_serial(self):
+        assert derive_search_concurrency(override=20, qos_max_jobs=1) == 1
+
+    def test_qos_zero_means_unlimited(self):
+        assert derive_search_concurrency(qos_max_jobs=0) == 8
+
+    def test_qos_negative_ignored(self):
+        assert derive_search_concurrency(qos_max_jobs=-5) == 8

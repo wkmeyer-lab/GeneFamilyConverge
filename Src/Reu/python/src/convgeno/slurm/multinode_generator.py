@@ -781,6 +781,36 @@ def derive_search_cpus_from_discovery(
     )
 
 
+_SEARCH_CONCURRENCY_DEFAULT = 8  # W: polite default max concurrent array tasks
+
+
+def derive_search_concurrency(
+    override: int | None = None,
+    qos_max_jobs: int | None = None,
+) -> int:
+    """Max concurrent search-array tasks (W) -- the array ``%W`` throttle.
+
+    W is the SPEED lever: total search time ~= total_cost / (W * C). It is a
+    polite *intent* cap, never tuned from a prior run -- the config default (8)
+    or a positive ``override`` (from ``MultinodeConfig.array_throttle``). When a
+    QOS ``MaxJobs`` limit is supplied it caps W (values < 1 mean "no limit" and
+    are ignored); SLURM enforces QOS at runtime regardless. The further cap
+    ``W <= T`` -- can't run more concurrently than there are tasks -- is applied
+    where the array header is emitted, once T is known.
+    """
+    if override is not None:
+        if override < 1:
+            raise ValueError(
+                f"array_throttle override must be >= 1, got {override}"
+            )
+        base = override
+    else:
+        base = _SEARCH_CONCURRENCY_DEFAULT
+    if qos_max_jobs is not None and qos_max_jobs >= 1:
+        base = min(base, qos_max_jobs)
+    return max(1, base)
+
+
 def generate_search_array_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
