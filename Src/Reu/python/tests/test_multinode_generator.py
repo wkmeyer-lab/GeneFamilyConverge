@@ -34,6 +34,7 @@ from convgeno.slurm.multinode_generator import (
     generate_search_array_script,
     lpt_partition,
     read_species_fasta_sizes,
+    resolve_search_concurrency,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -1043,3 +1044,35 @@ class TestDeriveSearchConcurrency:
 
     def test_qos_negative_ignored(self):
         assert derive_search_concurrency(qos_max_jobs=-5) == 8
+
+
+class TestResolveSearchConcurrency:
+    """W wired to discovery: derive_search_concurrency + detect_qos_max_jobs."""
+
+    def test_discovered_qos_caps_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
+            lambda partition: 3,
+        )
+        assert resolve_search_concurrency("hawkcpu") == 3
+
+    def test_no_qos_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
+            lambda partition: None,
+        )
+        assert resolve_search_concurrency("hawkcpu") == 8
+
+    def test_override_still_capped_by_qos(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
+            lambda partition: 5,
+        )
+        assert resolve_search_concurrency("hawkcpu", override=20) == 5
+
+    def test_override_used_when_qos_unknown(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
+            lambda partition: None,
+        )
+        assert resolve_search_concurrency("hawkcpu", override=12) == 12

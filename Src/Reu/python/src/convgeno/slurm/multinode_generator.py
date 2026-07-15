@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig, normalize_optional_account
+from convgeno.slurm.discovery import detect_qos_max_jobs
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
@@ -809,6 +810,23 @@ def derive_search_concurrency(
     if qos_max_jobs is not None and qos_max_jobs >= 1:
         base = min(base, qos_max_jobs)
     return max(1, base)
+
+
+def resolve_search_concurrency(
+    partition: str,
+    override: int | None = None,
+) -> int:
+    """Resolve W for *partition*: config/override, capped by the discovered QOS.
+
+    Thin submit-time wiring over :func:`derive_search_concurrency` and
+    :func:`convgeno.slurm.discovery.detect_qos_max_jobs`. When the QOS cannot be
+    determined the probe returns ``None`` and W falls back to the config
+    default / override untouched.
+    """
+    return derive_search_concurrency(
+        override=override,
+        qos_max_jobs=detect_qos_max_jobs(partition),
+    )
 
 
 def generate_search_array_script(

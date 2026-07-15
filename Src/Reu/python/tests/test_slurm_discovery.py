@@ -13,9 +13,12 @@ import pytest
 
 from convgeno.slurm.discovery import (
     PartitionInfo,
+    _parse_qos_max_jobs,
     _parse_sinfo_line,
+    detect_max_array_size,
     detect_partition_memory,
     detect_node_cpus,
+    detect_qos_max_jobs,
     detect_scratch_dir,
     discover_partitions,
     recommend_memory_mb,
@@ -439,3 +442,107 @@ class TestPartitionInfoStr:
         s = str(info)
         assert "rapids" in s
         assert "default" not in s
+
+
+# scontrol show config emits many lines; MaxArraySize is one of them.
+MOCK_SCONTROL_CONFIG = (
+    "Configuration data as of 2026-07-15\n"
+    "MaxArraySize            = 1001\n"
+    "MaxJobCount             = 100000\n"
+    "MaxTasksPerNode         = 512\n"
+)
+
+
+class TestDetectMaxArraySize:
+    def test_parses_max_array_size(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            return_value=Mock(returncode=0, stdout=MOCK_SCONTROL_CONFIG),
+        ):
+            assert detect_max_array_size() == 1001
+
+    def test_missing_key_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            return_value=Mock(returncode=0, stdout="MaxJobCount = 100000\n"),
+        ):
+            assert detect_max_array_size() is None
+
+    def test_nonzero_returncode_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            return_value=Mock(returncode=1, stdout=""),
+        ):
+            assert detect_max_array_size() is None
+
+    def test_scontrol_absent_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            assert detect_max_array_size() is None
+
+
+class TestParseQosMaxJobs:
+    def test_takes_most_restrictive_positive(self):
+        assert _parse_qos_max_jobs("10|5") == 5
+
+    def test_empty_field_is_unlimited(self):
+        assert _parse_qos_max_jobs("|5") == 5
+        assert _parse_qos_max_jobs("10|") == 10
+
+    def test_all_unlimited_returns_none(self):
+        assert _parse_qos_max_jobs("|") is None
+
+    def test_cleared_minus_one_skipped(self):
+        assert _parse_qos_max_jobs("-1|8") == 8
+
+
+class TestDetectQosMaxJobs:
+    def test_reads_qos_then_limits(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="PartitionName=hawkcpu QOS=normal ..."),
+                Mock(returncode=0, stdout="20|8\n"),
+            ],
+        ):
+            assert detect_qos_max_jobs("hawkcpu") == 8
+
+    def test_partition_qos_na_returns_none_without_sacctmgr(self):
+        # QOS=N/A -> no sacctmgr call, None.
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="PartitionName=hawkcpu QOS=N/A ..."),
+            ],
+        ) as mock_run:
+            assert detect_qos_max_jobs("hawkcpu") is None
+            assert mock_run.call_count == 1
+
+    def test_sacctmgr_absent_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="PartitionName=hawkcpu QOS=normal"),
+                FileNotFoundError,
+            ],
+        ):
+            assert detect_qos_max_jobs("hawkcpu") is None
+
+    def test_unlimited_qos_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=[
+                Mock(returncode=0, stdout="PartitionName=hawkcpu QOS=normal"),
+                Mock(returncode=0, stdout="|\n"),
+            ],
+        ):
+            assert detect_qos_max_jobs("hawkcpu") is None
+
+    def test_scontrol_absent_returns_none(self):
+        with patch(
+            "convgeno.slurm.discovery.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            assert detect_qos_max_jobs("hawkcpu") is None
