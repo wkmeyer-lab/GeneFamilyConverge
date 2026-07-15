@@ -29,12 +29,15 @@ from convgeno.slurm.multinode_generator import (
     derive_search_concurrency,
     derive_search_cpus,
     derive_search_cpus_from_discovery,
+    derive_search_task_count,
+    derive_search_waves,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
     lpt_partition,
     read_species_fasta_sizes,
     resolve_search_concurrency,
+    resolve_search_task_count,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -1076,3 +1079,79 @@ class TestResolveSearchConcurrency:
             lambda partition: None,
         )
         assert resolve_search_concurrency("hawkcpu", override=12) == 12
+
+
+class TestDeriveSearchWaves:
+    """K = waves: default 4, override wins."""
+
+    def test_default_is_four(self):
+        assert derive_search_waves() == 4
+
+    def test_override_wins(self):
+        assert derive_search_waves(override=6) == 6
+
+    def test_override_below_one_raises(self):
+        with pytest.raises(ValueError, match="waves .K. override"):
+            derive_search_waves(override=0)
+
+
+class TestDeriveSearchTaskCount:
+    """T = min(K*W, num_commands, MaxArraySize), clamped >= 1."""
+
+    def test_k_times_w_in_normal_regime(self):
+        # 114 species -> n^2 = 12996; MaxArraySize 1001 -> T = K*W = 32.
+        assert derive_search_task_count(12996, 8, 4, 1001) == 32
+
+    def test_no_max_array_size_uses_num_commands_ceiling(self):
+        assert derive_search_task_count(12996, 8, 4, None) == 32
+
+    def test_capped_by_num_commands(self):
+        # Tiny dataset: only 4 commands, so at most 4 tasks (< K*W = 32).
+        assert derive_search_task_count(4, 8, 4, None) == 4
+
+    def test_capped_by_max_array_size(self):
+        assert derive_search_task_count(12996, 8, 4, 16) == 16
+
+    def test_max_array_size_zero_ignored(self):
+        assert derive_search_task_count(12996, 8, 4, 0) == 32
+
+    def test_lower_bound_w_honored_when_feasible(self):
+        # K=1 -> T = min(W, ceiling); with a large ceiling T == W (>= W floor).
+        assert derive_search_task_count(12996, 8, 1, 1001) == 8
+
+    def test_ceiling_below_w_wins_over_floor(self):
+        # Only 4 commands but W=8: hard ceiling (4) beats the soft W floor.
+        assert derive_search_task_count(4, 8, 4, None) == 4
+
+    def test_clamped_to_at_least_one(self):
+        assert derive_search_task_count(1, 1, 1, None) == 1
+
+    def test_num_commands_below_one_raises(self):
+        with pytest.raises(ValueError, match="num_commands"):
+            derive_search_task_count(0, 8, 4)
+
+    def test_concurrency_below_one_raises(self):
+        with pytest.raises(ValueError, match="concurrency"):
+            derive_search_task_count(100, 0, 4)
+
+    def test_waves_below_one_raises(self):
+        with pytest.raises(ValueError, match="waves"):
+            derive_search_task_count(100, 8, 0)
+
+
+class TestResolveSearchTaskCount:
+    """T wired to discovery: derive_search_task_count + detect_max_array_size."""
+
+    def test_uses_discovered_max_array_size(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_max_array_size",
+            lambda: 16,
+        )
+        assert resolve_search_task_count(12996, 8, 4) == 16
+
+    def test_no_limit_falls_back_to_num_commands(self, monkeypatch):
+        monkeypatch.setattr(
+            "convgeno.slurm.multinode_generator.detect_max_array_size",
+            lambda: None,
+        )
+        assert resolve_search_task_count(12996, 8, 4) == 32

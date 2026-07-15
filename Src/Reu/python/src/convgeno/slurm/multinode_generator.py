@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig, normalize_optional_account
-from convgeno.slurm.discovery import detect_qos_max_jobs
+from convgeno.slurm.discovery import detect_max_array_size, detect_qos_max_jobs
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
@@ -826,6 +826,80 @@ def resolve_search_concurrency(
     return derive_search_concurrency(
         override=override,
         qos_max_jobs=detect_qos_max_jobs(partition),
+    )
+
+
+_SEARCH_WAVES_DEFAULT = 4  # K: waves of W tasks -> T = K * W buckets
+
+
+def derive_search_waves(override: int | None = None) -> int:
+    """Number of waves (K) the T = K*W buckets fan out over.
+
+    K is a granularity/balancing knob: a larger K makes more, smaller buckets,
+    giving LPT finer control and better backfill at the cost of more array
+    tasks. Config default 4, or a positive ``override`` (from
+    ``MultinodeConfig``). It is never capped by discovery -- K only multiplies
+    the task count, not the concurrency (that is W).
+    """
+    if override is not None:
+        if override < 1:
+            raise ValueError(f"waves (K) override must be >= 1, got {override}")
+        return override
+    return _SEARCH_WAVES_DEFAULT
+
+
+def derive_search_task_count(
+    num_commands: int,
+    concurrency: int,
+    waves: int,
+    max_array_size: int | None = None,
+) -> int:
+    """Number of LPT buckets / search-array tasks (T).
+
+    ``T = K*W`` (waves x concurrency), clamped into ``[W, min(n^2,
+    MaxArraySize)]``:
+
+    * **upper bound (HARD)** -- T must not exceed the number of commands
+      (``num_commands`` = n^2; more buckets would make empty tasks) nor SLURM's
+      ``MaxArraySize`` (a larger array is rejected);
+    * **lower bound (SOFT)** -- aim for at least W tasks so every concurrency
+      slot can be filled. Because ``K >= 1`` this holds automatically whenever
+      the ceiling allows; when the ceiling is below W (tiny dataset or a very
+      small ``MaxArraySize``) the hard ceiling wins and W is capped to T where
+      the array header is emitted.
+
+    Hence ``T = min(K*W, num_commands, MaxArraySize?)``, clamped ``>= 1``. A
+    ``max_array_size`` of ``None`` or ``< 1`` means "no array-size cap known".
+    """
+    if num_commands < 1:
+        raise ValueError(f"num_commands must be >= 1, got {num_commands}")
+    if concurrency < 1:
+        raise ValueError(f"concurrency (W) must be >= 1, got {concurrency}")
+    if waves < 1:
+        raise ValueError(f"waves (K) must be >= 1, got {waves}")
+    ceiling = num_commands
+    if max_array_size is not None and max_array_size >= 1:
+        ceiling = min(ceiling, max_array_size)
+    return max(1, min(waves * concurrency, ceiling))
+
+
+def resolve_search_task_count(
+    num_commands: int,
+    concurrency: int,
+    waves: int,
+) -> int:
+    """Resolve T with ``MaxArraySize`` pulled from cluster discovery.
+
+    Thin submit-time wiring over :func:`derive_search_task_count` and
+    :func:`convgeno.slurm.discovery.detect_max_array_size`. When the array-size
+    limit cannot be determined the probe returns ``None`` and only the
+    ``num_commands`` ceiling applies.
+    """
+    return derive_search_task_count(
+        num_commands=num_commands,
+        concurrency=concurrency,
+        waves=waves,
+        max_array_size=detect_max_array_size(),
     )
 
 
