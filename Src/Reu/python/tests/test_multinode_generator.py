@@ -26,6 +26,8 @@ from convgeno.slurm.multinode_generator import (
     derive_prepare_cpus,
     derive_prepare_memory_mb,
     derive_prepare_walltime,
+    derive_search_cpus,
+    derive_search_cpus_from_discovery,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
@@ -963,3 +965,48 @@ class TestReadSpeciesFastaSizes:
         (tmp_path / "SpeciesIDs.txt").write_text("nothing useful")
         with pytest.raises(FileNotFoundError, match="No Species"):
             read_species_fasta_sizes(tmp_path)
+
+
+class TestDeriveSearchCpus:
+    """C = min(max_cpus // 3, min_cpus - 1), clamped >= 1, override wins."""
+
+    def test_plan_example_heterogeneous(self):
+        # biggest 52 / smallest 15 -> min(17, 14) = 14 (smallest-node cap).
+        assert derive_search_cpus(52, 15) == 14
+
+    def test_plan_example_uniform_16(self):
+        # uniform 16-core -> min(5, 15) = 5 (third-of-biggest binds).
+        assert derive_search_cpus(16, 16) == 5
+
+    def test_smallest_node_cap_binds(self):
+        # biggest 120 / smallest 8 -> min(40, 7) = 7.
+        assert derive_search_cpus(120, 8) == 7
+
+    def test_third_of_biggest_binds(self):
+        # biggest 24 / smallest 100 -> min(8, 99) = 8.
+        assert derive_search_cpus(24, 100) == 8
+
+    def test_clamped_to_at_least_one(self):
+        # Tiny nodes: min(0, 0) -> clamp to 1.
+        assert derive_search_cpus(2, 1) == 1
+
+    def test_empty_discovery_returns_one(self):
+        assert derive_search_cpus(0, 0) == 1
+
+    def test_override_wins(self):
+        assert derive_search_cpus(52, 15, override=8) == 8
+
+    def test_override_below_one_raises(self):
+        with pytest.raises(ValueError, match="search_cpus override"):
+            derive_search_cpus(52, 15, override=0)
+
+    def test_from_discovery_dict(self):
+        node = {"min_cpus_per_node": 15, "max_cpus_per_node": 52}
+        assert derive_search_cpus_from_discovery(node) == 14
+
+    def test_from_discovery_empty_dict(self):
+        assert derive_search_cpus_from_discovery({}) == 1
+
+    def test_from_discovery_override_passes_through(self):
+        node = {"min_cpus_per_node": 15, "max_cpus_per_node": 52}
+        assert derive_search_cpus_from_discovery(node, override=4) == 4

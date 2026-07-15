@@ -731,6 +731,56 @@ def build_search_commands(
     return commands
 
 
+# ------------------------------------------------------------
+# Search-array sizing knobs (C, W, K, T)
+# ------------------------------------------------------------
+# C = cores per array task. Taking ~1/3 of the BIGGEST node makes each task a
+# backfillable fraction rather than a whole-node reservation; capping at
+# (SMALLEST node - 1) keeps a task schedulable on ANY node in the partition,
+# maximising backfill. Both node counts come from detect_node_cpus()
+# (discovery.py), which reports logical CPUs -- the unit SLURM --cpus-per-task
+# uses. C is user-overridable (later, via MultinodeConfig.search_cpus).
+
+_SEARCH_CPU_NODE_FRACTION = 3  # C targets ~1/3 of the biggest node
+_SEARCH_CPU_SMALLEST_HEADROOM = 1  # leave >=1 core free on the smallest node
+
+
+def derive_search_cpus(
+    max_cpus_per_node: int,
+    min_cpus_per_node: int,
+    override: int | None = None,
+) -> int:
+    """Cores per search-array task (C), clamped to >= 1.
+
+    ``C = min(max_cpus_per_node // 3, min_cpus_per_node - 1)``. The first term
+    keeps a task to a backfillable fraction of the largest node; the second
+    guarantees it still fits (with a core to spare) on the smallest node, so it
+    can land anywhere in the partition. A positive ``override`` (from
+    ``MultinodeConfig.search_cpus``) wins outright. When cluster discovery is
+    unavailable (both counts 0), returns 1 -- regenerate on-cluster for a
+    meaningful value.
+    """
+    if override is not None:
+        if override < 1:
+            raise ValueError(f"search_cpus override must be >= 1, got {override}")
+        return override
+    third_of_biggest = max_cpus_per_node // _SEARCH_CPU_NODE_FRACTION
+    fits_smallest = min_cpus_per_node - _SEARCH_CPU_SMALLEST_HEADROOM
+    return max(1, min(third_of_biggest, fits_smallest))
+
+
+def derive_search_cpus_from_discovery(
+    node_cpus: Mapping[str, int],
+    override: int | None = None,
+) -> int:
+    """``derive_search_cpus`` fed from a ``detect_node_cpus`` result dict."""
+    return derive_search_cpus(
+        max_cpus_per_node=node_cpus.get("max_cpus_per_node", 0),
+        min_cpus_per_node=node_cpus.get("min_cpus_per_node", 0),
+        override=override,
+    )
+
+
 def generate_search_array_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
