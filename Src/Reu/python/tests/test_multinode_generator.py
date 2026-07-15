@@ -18,6 +18,8 @@ from convgeno.slurm.config import PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX,
     COMMAND_LINE_REGEX_EXTRACT,
+    LPTResult,
+    SearchCommand,
     _proteome_volume,
     derive_prepare_cpus,
     derive_prepare_memory_mb,
@@ -25,6 +27,7 @@ from convgeno.slurm.multinode_generator import (
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
+    lpt_partition,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -731,3 +734,115 @@ class TestResumeScriptTmpdirAndThreads:
     def test_resume_exits_with_of_exit(self, config_threads_unset):
         script = generate_resume_script(config_threads_unset)
         assert 'exit "$OF_EXIT"' in script
+
+
+class TestLptPartition:
+    """LPT cost-balanced bucketing of the n^2 search commands.
+
+    Deterministic buckets from costs, full coverage with no duplicates, no
+    empty tasks when T <= n^2, provable balance, and the two sizing byproducts:
+    the biggest bucket's cost and the global-safe memory determinant.
+    """
+
+    @staticmethod
+    def _cmds(specs: list[tuple[int, int, int]]) -> list[SearchCommand]:
+        # specs: (line_index, query_bytes, db_bytes)
+        return [SearchCommand(li, q, d) for li, q, d in specs]
+
+    def test_known_small_case_is_exact(self):
+        # Costs: 10, 8, 6, 5, 2 (total 31). Item li=3 carries the largest DB
+        # (db=5) but a small cost, so it lands in the *smaller-cost* bucket --
+        # this is the case that distinguishes global-safe mem from
+        # biggest-bucket mem.
+        cmds = self._cmds(
+            [(0, 10, 1), (1, 8, 1), (2, 6, 1), (3, 1, 5), (4, 2, 1)]
+        )
+        res = lpt_partition(cmds, 2)
+        assert isinstance(res, LPTResult)
+        assert res.buckets == [[0, 3], [1, 2, 4]]
+        assert res.bucket_costs == [15, 16]
+        assert res.max_bucket_cost == 16
+
+    def test_mem_determinant_is_global_not_biggest_bucket(self):
+        # Largest DB (5) sits in bucket 0 (cost 15), NOT the biggest-cost
+        # bucket (cost 16, all DBs = 1). Global-safe => 5, not 1.
+        cmds = self._cmds(
+            [(0, 10, 1), (1, 8, 1), (2, 6, 1), (3, 1, 5), (4, 2, 1)]
+        )
+        res = lpt_partition(cmds, 2)
+        assert res.mem_determinant_bytes == 5
+
+    def test_covers_every_command_exactly_once(self):
+        cmds = self._cmds([(i, i + 1, (i % 3) + 1) for i in range(50)])
+        res = lpt_partition(cmds, 7)
+        flat = sorted(idx for bucket in res.buckets for idx in bucket)
+        assert flat == list(range(50))
+
+    def test_no_empty_bucket_when_buckets_le_commands(self):
+        cmds = self._cmds([(i, i + 1, 1) for i in range(20)])
+        res = lpt_partition(cmds, 20)
+        assert all(len(bucket) >= 1 for bucket in res.buckets)
+
+    def test_buckets_equal_commands_gives_one_each(self):
+        cmds = self._cmds([(i, i + 1, 1) for i in range(6)])
+        res = lpt_partition(cmds, 6)
+        assert sorted(len(b) for b in res.buckets) == [1, 1, 1, 1, 1, 1]
+
+    def test_more_buckets_than_commands_leaves_empties(self):
+        cmds = self._cmds([(0, 3, 1), (1, 2, 1), (2, 1, 1)])
+        res = lpt_partition(cmds, 5)
+        assert len(res.buckets) == 5
+        assert sum(1 for b in res.buckets if not b) == 2
+        flat = sorted(idx for b in res.buckets for idx in b)
+        assert flat == [0, 1, 2]
+
+    def test_single_bucket_holds_everything(self):
+        cmds = self._cmds([(0, 4, 1), (1, 3, 1), (2, 2, 1)])
+        res = lpt_partition(cmds, 1)
+        assert res.buckets == [[0, 1, 2]]
+        assert res.bucket_costs == [9]
+        assert res.max_bucket_cost == 9
+
+    def test_bucket_costs_match_assigned_commands(self):
+        cmds = self._cmds([(i, (i * 7) % 11 + 1, (i * 3) % 5 + 1) for i in range(40)])
+        cost_by_index = {c.line_index: c.cost for c in cmds}
+        res = lpt_partition(cmds, 6)
+        for bucket, total in zip(res.buckets, res.bucket_costs):
+            assert total == sum(cost_by_index[i] for i in bucket)
+        assert res.max_bucket_cost == max(res.bucket_costs)
+
+    def test_is_deterministic(self):
+        cmds = self._cmds([(i, (i * 13) % 17 + 1, (i * 5) % 7 + 1) for i in range(60)])
+        a = lpt_partition(cmds, 9)
+        b = lpt_partition(list(reversed(cmds)), 9)
+        assert a.buckets == b.buckets
+        assert a.bucket_costs == b.bucket_costs
+
+    def test_balance_within_greedy_bound(self):
+        # Greedy least-loaded guarantees max_bucket <= total/T + max_item:
+        # the last item added to the peak bucket found it at the minimum load,
+        # which is <= the average <= total/T.
+        cmds = self._cmds(
+            [(i, (i * 31) % 97 + 1, (i * 17) % 53 + 1) for i in range(200)]
+        )
+        t = 11
+        res = lpt_partition(cmds, t)
+        total = sum(c.cost for c in cmds)
+        max_item = max(c.cost for c in cmds)
+        assert res.max_bucket_cost <= total / t + max_item
+
+    def test_preserves_large_int_cost_precision(self):
+        # 100 MB x 100 MB self-search = 1e16 > 2**53: must stay exact.
+        big = 100 * 1024 * 1024
+        cmds = self._cmds([(0, big, big), (1, 2, 1)])
+        res = lpt_partition(cmds, 2)
+        assert res.max_bucket_cost == big * big
+
+    def test_raises_on_empty_commands(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            lpt_partition([], 4)
+
+    def test_raises_on_zero_buckets(self):
+        cmds = self._cmds([(0, 1, 1)])
+        with pytest.raises(ValueError, match="num_buckets"):
+            lpt_partition(cmds, 0)

@@ -13,7 +13,9 @@ The multi-node mode splits OrthoFinder into three chained jobs:
 
 from __future__ import annotations
 
+import heapq
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -486,6 +488,120 @@ echo "============================================================"
 exit 0
 """
     return script
+
+
+# ============================================================
+# Search-array load balancing (LPT bucketing)
+# ============================================================
+# The prepare phase emits exactly n^2 `diamond blastp` commands (one per
+# ordered species pair, self-searches included). The search array must
+# distribute them across T tasks so every task finishes at about the same
+# time -- a multiprocessor makespan-minimisation problem.
+#
+# We use greedy Longest-Processing-Time (LPT): weight each command by its
+# estimated cost, sort descending, then assign each to the currently
+# least-loaded bucket. Graham's bound guarantees makespan <=
+# (4/3 - 1/(3T)) * OPT, so buckets are provably near-balanced -- unlike v1's
+# cost-blind contiguous chunks, where one all-big-searches chunk set the whole
+# array's wall time.
+#
+# Cost model (a proxy for diamond blastp runtime): cost(i, j) = |S_i| * |S_j|,
+# the product of the query and target proteome sizes in bytes. Both drive the
+# alignment work, so self-searches and big x big pairs dominate.
+#
+# All arithmetic is integer on purpose: |S_i| * |S_j| for a large proteome
+# exceeds float's exact-integer range (2**53), so floats would lose precision
+# and make bucket sums -- and therefore tie-breaks -- non-deterministic.
+
+
+@dataclass(frozen=True)
+class SearchCommand:
+    """One emitted ``diamond blastp`` command, with its LPT cost inputs.
+
+    ``line_index`` is the command's 0-based position in the search-commands
+    file (``_search_commands.txt``); a per-task manifest is just a list of
+    these indices. ``query_bytes`` / ``db_bytes`` are the query (``S_i``) and
+    target-database (``S_j``) proteome sizes in bytes. ``db_bytes`` is tracked
+    separately because it -- not the query -- drives a diamond run's peak
+    memory: diamond loads the target database into RAM and streams the query.
+    """
+
+    line_index: int
+    query_bytes: int
+    db_bytes: int
+
+    @property
+    def cost(self) -> int:
+        """LPT weight ``|S_i| * |S_j|`` (bytes^2), a proxy for runtime."""
+        return self.query_bytes * self.db_bytes
+
+
+@dataclass(frozen=True)
+class LPTResult:
+    """Result of :func:`lpt_partition`.
+
+    ``buckets[b]`` holds the ``line_index`` values assigned to task ``b``
+    (ascending); ``bucket_costs[b]`` is that bucket's summed cost (parallel to
+    ``buckets``). ``max_bucket_cost`` -- the makespan-determining bucket --
+    later sizes the array's per-task ``--time``; ``mem_determinant_bytes`` --
+    the largest target database over *all* commands -- later sizes its per-task
+    ``--mem``. Neither is converted to SLURM units here: that needs C/p, base,
+    a throughput constant, and margins from the later sizing sub-steps.
+    """
+
+    buckets: list[list[int]]
+    bucket_costs: list[int]
+    max_bucket_cost: int
+    mem_determinant_bytes: int
+
+
+def lpt_partition(
+    commands: list[SearchCommand],
+    num_buckets: int,
+) -> LPTResult:
+    """Distribute ``commands`` into ``num_buckets`` cost-balanced buckets (LPT).
+
+    Sorts commands by cost descending (ties broken by ``line_index`` for
+    determinism) and greedily assigns each to the least-loaded bucket via a
+    min-heap. The first ``num_buckets`` commands therefore seed distinct empty
+    buckets, so no bucket is empty when ``num_buckets <= len(commands)``.
+
+    ``mem_determinant_bytes`` is the largest ``db_bytes`` over *all* commands,
+    not just the biggest bucket: a SLURM array applies one ``--mem`` to every
+    task, so it must cover whichever task ends up holding the largest database.
+
+    Raises ``ValueError`` if ``commands`` is empty or ``num_buckets < 1``.
+    """
+    if num_buckets < 1:
+        raise ValueError(f"num_buckets must be >= 1, got {num_buckets}")
+    if not commands:
+        raise ValueError("commands must be non-empty")
+
+    # Sort by cost descending; line_index breaks ties for a stable order.
+    ordered = sorted(commands, key=lambda c: (-c.cost, c.line_index))
+
+    buckets: list[list[int]] = [[] for _ in range(num_buckets)]
+    bucket_costs = [0] * num_buckets
+    # Min-heap of (current_total_cost, bucket_index). On ties the lowest
+    # bucket_index pops first, keeping the assignment fully deterministic.
+    heap = [(0, b) for b in range(num_buckets)]
+    heapq.heapify(heap)
+
+    for cmd in ordered:
+        _, b = heapq.heappop(heap)
+        buckets[b].append(cmd.line_index)
+        bucket_costs[b] += cmd.cost
+        heapq.heappush(heap, (bucket_costs[b], b))
+
+    for bucket in buckets:
+        bucket.sort()
+
+    return LPTResult(
+        buckets=buckets,
+        bucket_costs=bucket_costs,
+        max_bucket_cost=max(bucket_costs),
+        mem_determinant_bytes=max(cmd.db_bytes for cmd in commands),
+    )
 
 
 def generate_search_array_script(
