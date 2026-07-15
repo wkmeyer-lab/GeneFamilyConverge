@@ -20,7 +20,9 @@ from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX_EXTRACT,
     LPTResult,
     SearchCommand,
+    _parse_species_pair,
     _proteome_volume,
+    build_search_commands,
     derive_prepare_cpus,
     derive_prepare_memory_mb,
     derive_prepare_walltime,
@@ -28,6 +30,7 @@ from convgeno.slurm.multinode_generator import (
     generate_resume_script,
     generate_search_array_script,
     lpt_partition,
+    read_species_fasta_sizes,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -846,3 +849,117 @@ class TestLptPartition:
         cmds = self._cmds([(0, 1, 1)])
         with pytest.raises(ValueError, match="num_buckets"):
             lpt_partition(cmds, 0)
+
+
+# A representative diamond blastp command as emitted into _search_commands.txt.
+# The exact flags vary across OrthoFinder versions; the species pair is read
+# from the version-stable Blast{i}_{j} output token.
+def _diamond_cmd(i: int, j: int, workdir: str = "/w/WorkingDirectory") -> str:
+    return (
+        f"diamond blastp --ignore-warnings -d {workdir}/diamondDBSpecies{j} "
+        f"-q {workdir}/Species{i}.fa -o {workdir}/Blast{i}_{j}.txt.gz "
+        f"--more-sensitive -p 1 --quiet -e 0.001 --compress 1"
+    )
+
+
+class TestParseSpeciesPair:
+    """Species-pair extraction from a single emitted search command."""
+
+    def test_parses_query_i_and_db_j(self):
+        # Blast{i}_{j}: i is the query species, j is the target database.
+        assert _parse_species_pair(_diamond_cmd(7, 3)) == (7, 3)
+
+    def test_db_species_substring_not_mistaken_for_query(self):
+        # diamondDBSpecies3 contains "Species3" but must NOT be read as the
+        # query; the query is Species7.fa.
+        assert _parse_species_pair(_diamond_cmd(7, 3)) == (7, 3)
+
+    def test_self_search_pair(self):
+        assert _parse_species_pair(_diamond_cmd(4, 4)) == (4, 4)
+
+    def test_blast_token_only_fallback(self):
+        cmd = "diamond blastp -o /w/Blast2_5.txt.gz --opaque-future-flags"
+        assert _parse_species_pair(cmd) == (2, 5)
+
+    def test_query_db_tokens_when_no_blast_token(self):
+        cmd = "blastp -query /w/Species8.fa -db /w/diamondDBSpecies1 -out foo"
+        assert _parse_species_pair(cmd) == (8, 1)
+
+    def test_query_disagrees_with_blast_raises(self):
+        cmd = (
+            "diamond blastp -d /w/diamondDBSpecies3 -q /w/Species8.fa "
+            "-o /w/Blast7_3.txt.gz"
+        )
+        with pytest.raises(ValueError, match="disagrees"):
+            _parse_species_pair(cmd)
+
+    def test_db_disagrees_with_blast_raises(self):
+        cmd = (
+            "diamond blastp -d /w/diamondDBSpecies9 -q /w/Species7.fa "
+            "-o /w/Blast7_3.txt.gz"
+        )
+        with pytest.raises(ValueError, match="disagrees"):
+            _parse_species_pair(cmd)
+
+    def test_unparseable_command_raises(self):
+        with pytest.raises(ValueError, match="Could not determine"):
+            _parse_species_pair("diamond blastp --help")
+
+
+class TestBuildSearchCommands:
+    """Assembling the SearchCommand list from command lines + proteome sizes."""
+
+    def test_costs_use_query_and_db_sizes(self):
+        # Asymmetric sizes prove query_bytes<-i, db_bytes<-j (the mem-critical
+        # direction): Blast7_3 -> query=Species7 (200), db=Species3 (50).
+        sizes = {3: 50, 7: 200}
+        [cmd] = build_search_commands([_diamond_cmd(7, 3)], sizes)
+        assert cmd.line_index == 0
+        assert cmd.query_bytes == 200
+        assert cmd.db_bytes == 50
+        assert cmd.cost == 200 * 50
+
+    def test_line_index_is_positional(self):
+        sizes = {0: 10, 1: 20}
+        lines = [_diamond_cmd(0, 1), _diamond_cmd(1, 0), _diamond_cmd(1, 1)]
+        cmds = build_search_commands(lines, sizes)
+        assert [c.line_index for c in cmds] == [0, 1, 2]
+
+    def test_all_ordered_pairs_feed_lpt(self):
+        # n=3 -> 9 ordered pairs; end-to-end into lpt_partition. The mem
+        # determinant must equal the single largest proteome (200).
+        sizes = {0: 100, 1: 200, 2: 50}
+        lines = [_diamond_cmd(i, j) for i in range(3) for j in range(3)]
+        cmds = build_search_commands(lines, sizes)
+        assert len(cmds) == 9
+        res = lpt_partition(cmds, 3)
+        assert sum(len(b) for b in res.buckets) == 9
+        assert res.mem_determinant_bytes == 200
+
+    def test_blank_line_raises(self):
+        with pytest.raises(ValueError, match="Blank line"):
+            build_search_commands([_diamond_cmd(0, 0), "   "], {0: 10})
+
+    def test_missing_species_size_raises(self):
+        with pytest.raises(ValueError, match="No proteome size"):
+            build_search_commands([_diamond_cmd(0, 5)], {0: 10})
+
+
+class TestReadSpeciesFastaSizes:
+    """Reading Species{id}.fa byte sizes from a WorkingDirectory."""
+
+    def test_reads_sizes_and_ignores_other_files(self, tmp_path):
+        (tmp_path / "Species0.fa").write_text(">a\n" + "M" * 100 + "\n")
+        (tmp_path / "Species1.fa").write_text(">b\n" + "M" * 300 + "\n")
+        # These must be ignored, not counted as proteomes.
+        (tmp_path / "SpeciesIDs.txt").write_text("0: a.fa\n1: b.fa\n")
+        (tmp_path / "diamondDBSpecies0.dmnd").write_bytes(b"\x00\x01\x02")
+        sizes = read_species_fasta_sizes(tmp_path)
+        assert set(sizes) == {0, 1}
+        assert sizes[0] == (tmp_path / "Species0.fa").stat().st_size
+        assert sizes[1] == (tmp_path / "Species1.fa").stat().st_size
+
+    def test_no_species_files_raises(self, tmp_path):
+        (tmp_path / "SpeciesIDs.txt").write_text("nothing useful")
+        with pytest.raises(FileNotFoundError, match="No Species"):
+            read_species_fasta_sizes(tmp_path)

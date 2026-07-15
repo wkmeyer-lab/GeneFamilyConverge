@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import heapq
 import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -602,6 +604,131 @@ def lpt_partition(
         max_bucket_cost=max(bucket_costs),
         mem_determinant_bytes=max(cmd.db_bytes for cmd in commands),
     )
+
+
+# ------------------------------------------------------------
+# Building the SearchCommand list from real prepare output
+# ------------------------------------------------------------
+# `lpt_partition` consumes SearchCommands; these helpers construct them from
+# the two artefacts the prepare job leaves in the WorkingDirectory: the
+# blastp-only `_search_commands.txt` (one command per line) and the per-species
+# `Species{id}.fa` proteomes (their byte sizes are the cost/memory proxy).
+#
+# The species pair is read from the `Blast{i}_{j}` output token rather than by
+# matching an exact flag layout: OrthoFinder's own `-b` resume looks for
+# `Blast{i}_{j}.txt.gz`, so that naming is a hard, version-stable contract,
+# whereas the surrounding diamond flags vary across versions. `i` is the query
+# species, `j` is the target-database species (cost = |S_i|*|S_j|, memory ~
+# |S_j|). The query (`Species{i}.fa`) and database (`diamondDBSpecies{j}`)
+# tokens are cross-checked when present, and parsing fails loud otherwise.
+
+# Match `Blast<i>_<j>` anywhere on the line (the -o output path).
+_BLAST_PAIR_RE = re.compile(r"Blast(\d+)_(\d+)")
+# Match a standalone `Species<i>.fa` query token; the lookbehind stops it from
+# matching the `Species` inside `diamondDBSpecies<j>`.
+_QUERY_SPECIES_RE = re.compile(r"(?<![A-Za-z])Species(\d+)\.fa")
+# Match the diamond database token `diamondDBSpecies<j>` (with or without the
+# `.dmnd` extension).
+_DB_SPECIES_RE = re.compile(r"diamondDBSpecies(\d+)")
+# Match an exact `Species<id>.fa` filename (for reading proteome sizes).
+_SPECIES_FASTA_FILE_RE = re.compile(r"^Species(\d+)\.fa$")
+
+
+def _parse_species_pair(command: str) -> tuple[int, int]:
+    """Return ``(query_species_id, db_species_id)`` for one search command.
+
+    Primary signal is the ``Blast{i}_{j}`` output token; the query
+    (``Species{i}.fa``) and database (``diamondDBSpecies{j}``) tokens are used
+    to cross-check it, or as a fallback when it is absent. Raises
+    ``ValueError`` when the pair cannot be determined or the tokens disagree.
+    """
+    blast = _BLAST_PAIR_RE.search(command)
+    query = _QUERY_SPECIES_RE.search(command)
+    db = _DB_SPECIES_RE.search(command)
+
+    if blast is not None:
+        i, j = int(blast.group(1)), int(blast.group(2))
+        if query is not None and int(query.group(1)) != i:
+            raise ValueError(
+                f"Query token Species{query.group(1)}.fa disagrees with output "
+                f"Blast{i}_{j} in command: {command!r}"
+            )
+        if db is not None and int(db.group(1)) != j:
+            raise ValueError(
+                f"Database token diamondDBSpecies{db.group(1)} disagrees with "
+                f"output Blast{i}_{j} in command: {command!r}"
+            )
+        return i, j
+
+    # No Blast{i}_{j} token: fall back to the query + database tokens.
+    if query is not None and db is not None:
+        return int(query.group(1)), int(db.group(1))
+
+    raise ValueError(
+        "Could not determine the (query, database) species pair from search "
+        f"command: {command!r}"
+    )
+
+
+def read_species_fasta_sizes(work_dir: Path) -> dict[int, int]:
+    """Map species id -> ``Species{id}.fa`` byte size from a WorkingDirectory.
+
+    OrthoFinder writes one ``Species{id}.fa`` per species during ``-op``; its
+    byte size is the proteome-volume proxy the cost model uses. Ignores
+    everything else (``SpeciesIDs.txt``, ``diamondDBSpecies*.dmnd``, ...).
+    Raises ``FileNotFoundError`` when no such files exist.
+    """
+    sizes: dict[int, int] = {}
+    for entry in Path(work_dir).iterdir():
+        match = _SPECIES_FASTA_FILE_RE.match(entry.name)
+        if match is not None and entry.is_file():
+            sizes[int(match.group(1))] = entry.stat().st_size
+    if not sizes:
+        raise FileNotFoundError(
+            f"No Species<id>.fa proteome files found in WorkingDirectory: "
+            f"{work_dir}"
+        )
+    return sizes
+
+
+def build_search_commands(
+    command_lines: list[str],
+    species_sizes: Mapping[int, int],
+) -> list[SearchCommand]:
+    """Build the LPT input list from emitted commands + proteome sizes.
+
+    ``command_lines`` are the lines of ``_search_commands.txt`` (blastp only,
+    one command each); ``line_index`` is each command's 0-based position, which
+    the per-task manifest records and the array task uses to fetch the command.
+    ``species_sizes`` maps species id -> ``Species{id}.fa`` byte size.
+
+    Raises ``ValueError`` on a blank line, an unparseable command, or a species
+    with no known size.
+    """
+    commands: list[SearchCommand] = []
+    for line_index, raw in enumerate(command_lines):
+        line = raw.strip()
+        if not line:
+            raise ValueError(
+                f"Blank line at index {line_index} in the search-commands "
+                "list; expected exactly one blastp command per line."
+            )
+        i, j = _parse_species_pair(line)
+        for role, species in (("query", i), ("database", j)):
+            if species not in species_sizes:
+                raise ValueError(
+                    f"No proteome size for {role} species {species} "
+                    f"(command index {line_index}); known species: "
+                    f"{sorted(species_sizes)}."
+                )
+        commands.append(
+            SearchCommand(
+                line_index=line_index,
+                query_bytes=species_sizes[i],
+                db_bytes=species_sizes[j],
+            )
+        )
+    return commands
 
 
 def generate_search_array_script(
