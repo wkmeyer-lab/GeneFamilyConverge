@@ -903,6 +903,107 @@ def resolve_search_task_count(
     )
 
 
+# ------------------------------------------------------------
+# Per-task --time / --mem sizing (from the biggest LPT bucket)
+# ------------------------------------------------------------
+# TIME. The bucket cost is in bytes^2 (sum of |S_i|*|S_j|). A task keeps all C
+# cores busy -- C/p concurrent p-threaded diamonds -- so it burns cost at
+# (C * throughput_const) bytes^2/second:
+#
+#     seconds = max_bucket_cost / (C * throughput_const) * margin
+#
+# throughput_const is a per-CORE diamond alignment rate (bytes^2 per
+# core-second); p cancels (it repackages the same core-seconds, so it drives
+# memory, not time). The default is a deliberately CONSERVATIVE placeholder:
+# under-estimating time risks a task timeout (recoverable -- the resume
+# completeness gate reports missing pairs + a resubmit line), while
+# over-estimating only costs queue latency. CALIBRATE after the first real run:
+#     throughput_const ~= max_bucket_cost / (C * observed_task_seconds) * margin
+#
+# MEMORY. C/p concurrent diamonds each load their target database, so peak RAM
+# is concurrency * per_command + base. per_command uses the largest target DB
+# (bytes) but is floored: for small proteomes (~10 MB) diamond's fixed working
+# set (seed index + query block) dwarfs the loaded DB, so DB size alone would
+# under-provision; db_safety only takes over for unusually large databases.
+
+_SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC = 1.0e12  # conservative; CALIBRATE
+_SEARCH_TIME_MARGIN = 1.5
+_SEARCH_TIME_MIN_SEC = 900  # 15 min floor (diamond startup + DB load + I/O)
+_SEARCH_TIME_MAX_SEC = 259200  # 72 h safety cap; hitting it => raise T
+
+_SEARCH_MEM_DB_SAFETY = 4.0  # in-memory DB inflation over FASTA bytes
+_SEARCH_MEM_PER_COMMAND_FLOOR_MB = 2048  # diamond per-process working set
+_SEARCH_MEM_BASE_MB = 2048  # OS + orchestration overhead
+_SEARCH_MEM_ROUND_MB = 1024
+_SEARCH_MEM_FLOOR_MB = 4096
+
+
+def within_task_concurrency(
+    cpus_per_task: int,
+    threads_per_command: int = 1,
+) -> int:
+    """Concurrent diamond commands per task = ``C // p`` (>= 1).
+
+    Each emitted command uses ``p`` threads (``-p``, expected 1); running
+    ``C // p`` of them at once keeps all C cores busy. ``p`` is detected from
+    the emitted command later; the default 1 means concurrency == C.
+    """
+    if cpus_per_task < 1:
+        raise ValueError(f"cpus_per_task must be >= 1, got {cpus_per_task}")
+    if threads_per_command < 1:
+        raise ValueError(
+            f"threads_per_command must be >= 1, got {threads_per_command}"
+        )
+    return max(1, cpus_per_task // threads_per_command)
+
+
+def derive_search_walltime(
+    max_bucket_cost: int,
+    cpus_per_task: int,
+    throughput_const: float = _SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC,
+    margin: float = _SEARCH_TIME_MARGIN,
+) -> str | None:
+    """Per-task walltime ``HH:MM:SS`` from the biggest bucket's cost.
+
+    ``seconds = max_bucket_cost / (cpus_per_task * throughput_const) * margin``,
+    clamped to ``[15 min, 72 h]``. ``throughput_const`` is bytes^2 per
+    core-second (see the section comment; CALIBRATE after the first run).
+    Returns ``None`` when not estimable (no cost / cores / rate) so the caller
+    can fall back to the user default walltime.
+    """
+    if max_bucket_cost <= 0 or cpus_per_task <= 0 or throughput_const <= 0:
+        return None
+    seconds = max_bucket_cost / (cpus_per_task * throughput_const) * margin
+    seconds = int(math.ceil(seconds))
+    seconds = max(_SEARCH_TIME_MIN_SEC, min(_SEARCH_TIME_MAX_SEC, seconds))
+    return _seconds_to_hms(seconds)
+
+
+def derive_search_memory_mb(
+    mem_determinant_bytes: int,
+    concurrency: int,
+    db_safety: float = _SEARCH_MEM_DB_SAFETY,
+    per_command_floor_mb: int = _SEARCH_MEM_PER_COMMAND_FLOOR_MB,
+    base_mb: int = _SEARCH_MEM_BASE_MB,
+) -> int | None:
+    """Per-task memory (MB) from the largest target database.
+
+    ``mem = concurrency * max(largest_DB * db_safety, per_command_floor) +
+    base``, rounded up to the nearest 1 GB with a 4 GB floor. ``concurrency``
+    is ``C // p`` (concurrent diamonds, each loading its target DB). The
+    per-command floor covers diamond's fixed working set, which dominates the
+    small proteome DBs in this regime; ``db_safety`` only bites for unusually
+    large databases. Returns ``None`` when not estimable.
+    """
+    if mem_determinant_bytes <= 0 or concurrency <= 0:
+        return None
+    largest_db_mb = mem_determinant_bytes / (1024 * 1024)
+    per_command_mb = max(largest_db_mb * db_safety, per_command_floor_mb)
+    raw = concurrency * per_command_mb + base_mb
+    rounded = math.ceil(raw / _SEARCH_MEM_ROUND_MB) * _SEARCH_MEM_ROUND_MB
+    return max(_SEARCH_MEM_FLOOR_MB, int(rounded))
+
+
 def generate_search_array_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,

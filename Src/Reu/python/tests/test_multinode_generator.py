@@ -29,7 +29,9 @@ from convgeno.slurm.multinode_generator import (
     derive_search_concurrency,
     derive_search_cpus,
     derive_search_cpus_from_discovery,
+    derive_search_memory_mb,
     derive_search_task_count,
+    derive_search_walltime,
     derive_search_waves,
     generate_prepare_script,
     generate_resume_script,
@@ -38,6 +40,7 @@ from convgeno.slurm.multinode_generator import (
     read_species_fasta_sizes,
     resolve_search_concurrency,
     resolve_search_task_count,
+    within_task_concurrency,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -1155,3 +1158,108 @@ class TestResolveSearchTaskCount:
             lambda: None,
         )
         assert resolve_search_task_count(12996, 8, 4) == 32
+
+
+class TestWithinTaskConcurrency:
+    """Concurrent diamond commands per task = C // p (>= 1)."""
+
+    def test_p_one_equals_cpus(self):
+        assert within_task_concurrency(14, 1) == 14
+
+    def test_default_p_is_one(self):
+        assert within_task_concurrency(14) == 14
+
+    def test_integer_division(self):
+        assert within_task_concurrency(16, 4) == 4
+        assert within_task_concurrency(14, 3) == 4  # 14 // 3
+
+    def test_floors_at_one(self):
+        # p larger than C -> still one command at a time.
+        assert within_task_concurrency(2, 8) == 1
+
+    def test_invalid_cpus_raises(self):
+        with pytest.raises(ValueError, match="cpus_per_task"):
+            within_task_concurrency(0, 1)
+
+    def test_invalid_threads_raises(self):
+        with pytest.raises(ValueError, match="threads_per_command"):
+            within_task_concurrency(8, 0)
+
+
+class TestDeriveSearchWalltime:
+    """bytes^2 bucket cost -> HH:MM:SS via C * throughput_const, clamped."""
+
+    def test_none_when_not_estimable(self):
+        assert derive_search_walltime(0, 14) is None
+        assert derive_search_walltime(10**16, 0) is None
+        assert derive_search_walltime(10**16, 14, throughput_const=0) is None
+
+    def test_exact_mid_range_value(self):
+        # 2.4e16 / (10 * 1e12) = 2400 s; * 1.5 margin = 3600 s = 01:00:00.
+        got = derive_search_walltime(
+            24_000_000_000_000_000, 10, throughput_const=1e12, margin=1.5
+        )
+        assert got == "01:00:00"
+
+    def test_clamped_to_min(self):
+        # Tiny bucket -> 15 min floor.
+        assert derive_search_walltime(1, 14) == "00:15:00"
+
+    def test_clamped_to_max(self):
+        # Enormous bucket -> 72 h cap.
+        assert derive_search_walltime(10**24, 1) == "72:00:00"
+
+    def test_more_cpus_means_less_time(self):
+        few = derive_search_walltime(10**17, 4, throughput_const=1e12)
+        many = derive_search_walltime(10**17, 32, throughput_const=1e12)
+        assert few > many  # HH:MM:SS strings compare correctly here
+
+    def test_larger_margin_means_more_time(self):
+        lo = derive_search_walltime(10**17, 8, throughput_const=1e12, margin=1.0)
+        hi = derive_search_walltime(10**17, 8, throughput_const=1e12, margin=3.0)
+        assert hi > lo
+
+
+class TestDeriveSearchMemoryMb:
+    """Largest target DB -> per-task MB; working-set floor, then DB scaling."""
+
+    def test_none_when_not_estimable(self):
+        assert derive_search_memory_mb(0, 14) is None
+        assert derive_search_memory_mb(10 * 1024 * 1024, 0) is None
+
+    def test_floor_dominates_for_small_proteomes(self):
+        # 12 MB DB * 4 = 48 MB < 2048 floor -> per_command = 2048.
+        # 14 * 2048 + 2048 base = 30720 MB.
+        assert derive_search_memory_mb(12 * 1024 * 1024, 14) == 30720
+
+    def test_db_scaling_for_large_databases(self):
+        # 1 GB DB * 4 = 4096 MB > 2048 floor -> per_command = 4096.
+        # 14 * 4096 + 2048 = 59392 MB.
+        assert derive_search_memory_mb(1024 * 1024 * 1024, 14) == 59392
+
+    def test_global_floor(self):
+        # concurrency 1, tiny DB -> 1 * 2048 + 2048 = 4096 = floor.
+        assert derive_search_memory_mb(1 * 1024 * 1024, 1) == 4096
+
+    def test_rounds_up_to_gb(self):
+        mem = derive_search_memory_mb(
+            10 * 1024 * 1024, 7, base_mb=1500, per_command_floor_mb=1000
+        )
+        assert mem % 1024 == 0
+
+    def test_scales_with_concurrency(self):
+        small = derive_search_memory_mb(12 * 1024 * 1024, 4)
+        large = derive_search_memory_mb(12 * 1024 * 1024, 32)
+        assert large > small
+
+    def test_overrides_apply(self):
+        # db_safety binds: per_command = max(50*8, 100) = 400;
+        # 12 * 400 + 1000 = 5800 -> round up to 6144 (above the 4 GB floor).
+        mem = derive_search_memory_mb(
+            50 * 1024 * 1024,
+            12,
+            db_safety=8.0,
+            per_command_floor_mb=100,
+            base_mb=1000,
+        )
+        assert mem == 6144
