@@ -733,6 +733,65 @@ def build_search_commands(
 
 
 # ------------------------------------------------------------
+# Per-task manifests (LPT buckets -> one file per array task)
+# ------------------------------------------------------------
+# lpt_partition returns buckets of line indices; the search array runs task
+# `$SLURM_ARRAY_TASK_ID`, which reads its own manifest file and runs each line.
+# Each manifest holds the resolved `diamond blastp` commands (copied from
+# `_search_commands.txt`), so a task is self-contained: no cross-referencing
+# back into the commands file, and the idempotent skip parses Blast{i}_{j}
+# straight from the line it is about to run. `search_task_manifest_name` is the
+# naming contract shared with the search-array script generator.
+
+_SEARCH_MANIFEST_PREFIX = "search_task_"
+_SEARCH_MANIFEST_SUFFIX = ".txt"
+
+
+def search_task_manifest_name(task_id: int) -> str:
+    """Manifest filename for array task ``task_id`` (== ``SLURM_ARRAY_TASK_ID``)."""
+    return f"{_SEARCH_MANIFEST_PREFIX}{task_id}{_SEARCH_MANIFEST_SUFFIX}"
+
+
+def write_task_manifests(
+    buckets: list[list[int]],
+    command_lines: list[str],
+    manifest_dir: Path,
+) -> list[Path]:
+    """Write one manifest file per LPT bucket into ``manifest_dir``.
+
+    ``buckets[t]`` holds line indices into ``command_lines`` (the lines of
+    ``_search_commands.txt`` that produced the LPT partition); task ``t``'s file
+    (``search_task_{t}.txt``) receives those commands, one per line. A file is
+    written for **every** task id ``0..T-1`` -- empty buckets produce empty
+    files -- so no array task ever reads a missing manifest. Returns the written
+    paths in task order.
+
+    Raises ``ValueError`` if a bucket references a line index outside
+    ``command_lines`` (a caller contract violation: ``command_lines`` must be
+    the same list ``build_search_commands`` indexed).
+    """
+    n = len(command_lines)
+    manifest_dir = Path(manifest_dir)
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+
+    paths: list[Path] = []
+    for task_id, bucket in enumerate(buckets):
+        resolved: list[str] = []
+        for idx in bucket:
+            if not 0 <= idx < n:
+                raise ValueError(
+                    f"Task {task_id} references line index {idx}, out of range "
+                    f"for {n} commands."
+                )
+            resolved.append(command_lines[idx].strip())
+        path = manifest_dir / search_task_manifest_name(task_id)
+        body = "\n".join(resolved)
+        path.write_text(body + "\n" if body else "", encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+# ------------------------------------------------------------
 # Search-array sizing knobs (C, W, K, T)
 # ------------------------------------------------------------
 # C = cores per array task. Taking ~1/3 of the BIGGEST node makes each task a

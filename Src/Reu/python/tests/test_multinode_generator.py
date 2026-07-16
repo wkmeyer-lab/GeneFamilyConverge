@@ -40,7 +40,9 @@ from convgeno.slurm.multinode_generator import (
     read_species_fasta_sizes,
     resolve_search_concurrency,
     resolve_search_task_count,
+    search_task_manifest_name,
     within_task_concurrency,
+    write_task_manifests,
 )
 from convgeno.slurm.runtime import CondaRuntimeConfig
 
@@ -1263,3 +1265,66 @@ class TestDeriveSearchMemoryMb:
             base_mb=1000,
         )
         assert mem == 6144
+
+
+class TestWriteTaskManifests:
+    """LPT buckets -> one self-contained command file per array task."""
+
+    def test_name_matches_array_task_id(self):
+        assert search_task_manifest_name(0) == "search_task_0.txt"
+        assert search_task_manifest_name(31) == "search_task_31.txt"
+
+    def test_writes_one_file_per_task_with_commands(self, tmp_path):
+        cmds = [f"diamond blastp -o /w/Blast{i}_0.txt.gz -q x" for i in range(5)]
+        buckets = [[0, 2, 4], [1, 3]]
+        paths = write_task_manifests(buckets, cmds, tmp_path / "manifest")
+        assert [p.name for p in paths] == ["search_task_0.txt", "search_task_1.txt"]
+        assert paths[0].read_text().splitlines() == [cmds[0], cmds[2], cmds[4]]
+        assert paths[1].read_text().splitlines() == [cmds[1], cmds[3]]
+
+    def test_trailing_newline_for_clean_iteration(self, tmp_path):
+        [path] = write_task_manifests([[0]], ["cmd-a"], tmp_path)
+        assert path.read_text() == "cmd-a\n"
+
+    def test_empty_bucket_writes_empty_file(self, tmp_path):
+        paths = write_task_manifests([[0], []], ["only-cmd"], tmp_path)
+        assert paths[1].exists()
+        assert paths[1].read_text() == ""
+
+    def test_creates_manifest_dir(self, tmp_path):
+        target = tmp_path / "nested" / "manifest"
+        write_task_manifests([[0]], ["cmd"], target)
+        assert target.is_dir()
+
+    def test_every_command_appears_exactly_once(self, tmp_path):
+        cmds = [f"cmd{i}" for i in range(20)]
+        # A plausible LPT-style partition of all 20 indices over 6 tasks.
+        buckets = [
+            [0, 6, 12, 18], [1, 7, 13, 19], [2, 8, 14],
+            [3, 9, 15], [4, 10, 16], [5, 11, 17],
+        ]
+        paths = write_task_manifests(buckets, cmds, tmp_path)
+        assert len(paths) == 6
+        seen = [line for p in paths for line in p.read_text().splitlines()]
+        assert sorted(seen) == sorted(cmds)
+
+    def test_out_of_range_index_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="out of range"):
+            write_task_manifests([[0, 5]], ["only-one-cmd"], tmp_path)
+
+    def test_end_to_end_from_lpt(self, tmp_path):
+        # build_search_commands -> lpt_partition -> write_task_manifests, and
+        # confirm the manifests together reproduce exactly the input commands.
+        sizes = {0: 100, 1: 200, 2: 50}
+        lines = [
+            f"diamond blastp -d /w/diamondDBSpecies{j} -q /w/Species{i}.fa "
+            f"-o /w/Blast{i}_{j}.txt.gz -p 1"
+            for i in range(3)
+            for j in range(3)
+        ]
+        cmds = build_search_commands(lines, sizes)
+        result = lpt_partition(cmds, 3)
+        paths = write_task_manifests(result.buckets, lines, tmp_path)
+        assert len(paths) == 3
+        seen = [line for p in paths for line in p.read_text().splitlines()]
+        assert sorted(seen) == sorted(lines)
