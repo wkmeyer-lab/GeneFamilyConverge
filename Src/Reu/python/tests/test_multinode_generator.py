@@ -14,18 +14,22 @@ from pathlib import Path
 import pytest
 
 from convgeno.external.config import OrthoFinderConfig
-from convgeno.slurm.config import PipelineConfig, SlurmConfig
+from convgeno.slurm.config import MultinodeConfig, PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX,
     COMMAND_LINE_REGEX_EXTRACT,
     LPTResult,
+    SearchArraySizing,
     SearchCommand,
     _parse_species_pair,
     _proteome_volume,
+    build_all_pairs_search_commands,
     build_search_commands,
+    compute_search_array_sizing,
     derive_prepare_cpus,
     derive_prepare_memory_mb,
     derive_prepare_walltime,
+    derive_search_array_sizing,
     derive_search_concurrency,
     derive_search_cpus,
     derive_search_cpus_from_discovery,
@@ -506,13 +510,102 @@ class TestCommandExtractionRegex:
         assert "ACCEPTED" in result.stdout
 
 
-class TestSearchArrayStub:
-    """The v1 search array has been removed; the v2 generator is a hard stub
-    that raises NotImplementedError until the LPT/C-W-K-T sizing is built."""
+class TestSearchArrayScript:
+    """v2 search array: LPT-manifest-driven, C/p concurrency, idempotent skip,
+    scratch (or direct-to-shared) outputs."""
 
-    def test_raises_not_implemented(self, sample_config):
-        with pytest.raises(NotImplementedError, match="search array"):
-            generate_search_array_script(sample_config)
+    @pytest.fixture()
+    def scratch_config(self, sample_runtime) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=16,
+                scratch_dir="/share/ceph/scratch",
+                is_ephemeral_scratch=False,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/share/ceph/project/proteomes",
+                output_dir="/share/ceph/project/results",
+                search_threads=16,
+                analysis_threads=8,
+            ),
+            runtime=sample_runtime,
+        )
+
+    def test_shebang(self, sample_config):
+        assert generate_search_array_script(sample_config).startswith("#!/bin/bash\n")
+
+    def test_job_name(self, sample_config):
+        assert "--job-name=convgeno_of_search" in generate_search_array_script(
+            sample_config
+        )
+
+    def test_array_header_matches_sizing(self, sample_config):
+        sizing = derive_search_array_sizing(sample_config)
+        throttle = min(sizing.concurrency, sizing.tasks)
+        script = generate_search_array_script(sample_config)
+        assert f"--array=0-{sizing.tasks - 1}%{throttle}" in script
+        assert f"--cpus-per-task={sizing.cpus}" in script
+
+    def test_reads_per_task_manifest(self, sample_config):
+        script = generate_search_array_script(sample_config)
+        assert 'search_task_${SLURM_ARRAY_TASK_ID}.txt' in script
+        assert "_search_manifests" in script
+
+    def test_idempotent_skip_with_gzip_test(self, sample_config):
+        script = generate_search_array_script(sample_config)
+        assert "gzip -t" in script
+        assert "Blast([0-9]+)_([0-9]+)" in script  # pair parsed from Blast token
+        assert "$STATUS_DIR/skipped" in script
+
+    def test_concurrent_via_xargs(self, sample_config):
+        script = generate_search_array_script(sample_config)
+        assert "xargs" in script and "-P" in script
+        assert "run_one" in script
+
+    def test_uses_uo_pipefail_not_errexit(self, sample_config):
+        # Per-command tolerance: the array must NOT abort on a failed command.
+        script = generate_search_array_script(sample_config)
+        assert "set -uo pipefail" in script
+        assert "set -euo pipefail" not in script
+
+    def test_direct_to_shared_when_no_scratch(self, sample_config):
+        # sample_config has scratch_dir=None.
+        script = generate_search_array_script(sample_config)
+        assert 'OUTPUT_BASE="$WORK_DIR"' in script
+        assert "Scratch not configured" in script
+        assert "resolve_scratch_base" not in script
+
+    def test_scratch_setup_when_configured(self, scratch_config):
+        script = generate_search_array_script(scratch_config)
+        assert "resolve_scratch_base" in script
+        assert 'PREFERRED_SCRATCH="/share/ceph/scratch"' in script
+        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+        assert "salvage_scratch" in script
+        assert 'rsync -a "$OUTPUT_BASE"/ "$WORK_DIR"/' in script
+
+    def test_persistent_scratch_is_left(self, scratch_config):
+        script = generate_search_array_script(scratch_config)
+        assert "Persistent scratch left" in script
+
+    def test_ephemeral_scratch_is_cleaned(self, sample_runtime):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/local/scratch",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/out/run"),
+            runtime=sample_runtime,
+        )
+        script = generate_search_array_script(cfg)
+        assert "Cleaning up ephemeral scratch" in script
+
+    def test_exits_nonzero_on_failures(self, sample_config):
+        script = generate_search_array_script(sample_config)
+        assert 'if [ "$FAILED" -gt 0 ]; then' in script
 
 
 class TestResumeScript:
@@ -549,16 +642,18 @@ class TestResumeScript:
 
 class TestCrossCutting:
     def _all_scripts(self, config):
-        # The search array is a v2 stub (raises), so cross-cutting checks cover
-        # the two generators that actually produce scripts.
         return [
             generate_prepare_script(config),
+            generate_search_array_script(config),
             generate_resume_script(config),
         ]
 
-    def test_all_scripts_have_set_euo_pipefail(self, sample_config):
+    def test_all_scripts_have_pipefail(self, sample_config):
+        # prepare/resume abort on any error (set -euo pipefail); the search
+        # array tolerates per-command failures (set -uo pipefail). Both share
+        # the pipefail invariant.
         for script in self._all_scripts(sample_config):
-            assert "set -euo pipefail" in script
+            assert "pipefail" in script
 
     def test_all_scripts_activate_conda(self, sample_config):
         for script in self._all_scripts(sample_config):
@@ -589,7 +684,7 @@ class TestCrossCutting:
         # design error (mkdir/redirect order, wrong flags) that string-
         # matching tests missed. At minimum, every generated script must
         # parse under `bash -n`.
-        names = ["prepare.sh", "resume.sh"]
+        names = ["prepare.sh", "search.sh", "resume.sh"]
         for name, script in zip(names, self._all_scripts(sample_config)):
             path = tmp_path / name
             path.write_text(script)
@@ -609,13 +704,12 @@ class TestCrossCutting:
             slurm=SlurmConfig(partition="hawkcpu"),
             runtime=sample_runtime,
         )
-        # prepare/resume validate the orthofinder block; the search array is a
-        # v2 stub that raises NotImplementedError regardless of config.
+        # All three generators validate the orthofinder block first.
         with pytest.raises(ValueError, match="OrthoFinder"):
             generate_prepare_script(config)
         with pytest.raises(ValueError, match="OrthoFinder"):
             generate_resume_script(config)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="OrthoFinder"):
             generate_search_array_script(config)
 
 
@@ -1328,3 +1422,98 @@ class TestWriteTaskManifests:
         assert len(paths) == 3
         seen = [line for p in paths for line in p.read_text().splitlines()]
         assert sorted(seen) == sorted(lines)
+
+
+class TestBuildAllPairsSearchCommands:
+    """Generate-time n^2 estimate commands from a proteome-size list."""
+
+    def test_count_and_pairs(self):
+        cmds = build_all_pairs_search_commands([100, 200, 50])
+        assert len(cmds) == 9  # n^2
+        assert [c.line_index for c in cmds] == list(range(9))
+        # cost is |S_i| * |S_j| over the full cartesian product.
+        assert max(c.cost for c in cmds) == 200 * 200
+        assert {c.db_bytes for c in cmds} == {100, 200, 50}
+
+    def test_empty_sizes(self):
+        assert build_all_pairs_search_commands([]) == []
+
+
+class TestComputeSearchArraySizing:
+    """The whole C/W/K/T + time/mem bundle from sizes + cluster numbers."""
+
+    def test_normal_regime(self):
+        sizing = compute_search_array_sizing(
+            [10_000_000] * 114,  # 114 ~10 MB proteomes
+            max_cpus_per_node=52,
+            min_cpus_per_node=15,
+            qos_max_jobs=None,
+            max_array_size=1001,
+            fallback_time="72:00:00",
+            fallback_mem="16000M",
+        )
+        assert sizing.cpus == 14  # min(52//3, 15-1)
+        assert sizing.concurrency == 8
+        assert sizing.waves == 4
+        assert sizing.tasks == 32  # K*W, well under n^2=12996 and MaxArraySize
+        assert sizing.within_task_parallel == 14  # C/p, p=1
+        assert sizing.mem.endswith("M")
+
+    def test_qos_caps_concurrency(self):
+        sizing = compute_search_array_sizing(
+            [10_000_000] * 20,
+            max_cpus_per_node=52,
+            min_cpus_per_node=15,
+            qos_max_jobs=3,
+            max_array_size=1001,
+            fallback_time="72:00:00",
+            fallback_mem="16000M",
+        )
+        assert sizing.concurrency == 3  # W capped by QOS
+
+    def test_off_cluster_falls_back(self):
+        # No sizes, no discovery: safe fallbacks, still a valid array.
+        sizing = compute_search_array_sizing(
+            [],
+            max_cpus_per_node=0,
+            min_cpus_per_node=0,
+            qos_max_jobs=None,
+            max_array_size=None,
+            fallback_time="72:00:00",
+            fallback_mem="16000M",
+        )
+        assert sizing.cpus == 1
+        assert sizing.concurrency == 8
+        assert sizing.tasks == 32  # K*W (no n^2 cap available)
+        assert sizing.time_limit == "72:00:00"  # fallback
+        assert sizing.mem == "16000M"  # fallback
+
+    def test_overrides_win(self):
+        sizing = compute_search_array_sizing(
+            [10_000_000] * 50,
+            max_cpus_per_node=52,
+            min_cpus_per_node=15,
+            qos_max_jobs=None,
+            max_array_size=1001,
+            fallback_time="72:00:00",
+            fallback_mem="16000M",
+            overrides=MultinodeConfig(
+                search_cpus=8,
+                array_throttle=4,
+                waves=2,
+                search_time_limit="03:00:00",
+                search_mem="24000M",
+            ),
+        )
+        assert sizing.cpus == 8
+        assert sizing.concurrency == 4
+        assert sizing.waves == 2
+        assert sizing.tasks == 8  # K*W = 2*4
+        assert sizing.time_limit == "03:00:00"
+        assert sizing.mem == "24000M"
+
+    def test_returns_dataclass(self):
+        sizing = compute_search_array_sizing(
+            [], 0, 0, None, None, fallback_time="1:00:00", fallback_mem="8000M"
+        )
+        assert isinstance(sizing, SearchArraySizing)

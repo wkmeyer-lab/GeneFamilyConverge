@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from convgeno.cli.orthofinder_cmd import (
+    SubmitResult,
     run_generate_multinode,
     run_submit_multinode,
 )
@@ -66,17 +67,23 @@ class TestRunGenerateMultinode:
         "convgeno.cli.orthofinder_cmd.validate_orthofinder_inputs",
         return_value=_mock_validation_pass(),
     )
-    def test_creates_prepare_and_resume(self, _mock_validate, sample_config_file):
-        # Search array is a v2 stub, so generate produces prepare + resume only.
+    def test_creates_all_three_scripts(self, _mock_validate, sample_config_file):
+        # v2 generates prepare + search array + resume.
         f = sample_config_file
         result = run_generate_multinode(
             config_path=f["config_path"],
             script_dir=str(f["tmp_path"] / "scripts"),
         )
-        assert set(result.keys()) == {"prepare", "resume"}
+        assert set(result.keys()) == {"prepare", "search", "resume"}
         for path in result.values():
             assert path.exists()
             assert path.read_text(encoding="utf-8").startswith("#!/bin/bash")
+        # The search script is a SLURM array; the prepare builds the manifest.
+        assert "--array=" in result["search"].read_text(encoding="utf-8")
+        assert (
+            "build_search_manifest"
+            in result["prepare"].read_text(encoding="utf-8")
+        )
 
 
 class TestRunSubmitMultinode:
@@ -84,16 +91,22 @@ class TestRunSubmitMultinode:
         "convgeno.cli.orthofinder_cmd.validate_orthofinder_inputs",
         return_value=_mock_validation_pass(),
     )
-    @patch("convgeno.cli.orthofinder_cmd.submit_sbatch")
-    def test_refuses_chain_until_search_v2(
+    @patch(
+        "convgeno.cli.orthofinder_cmd.submit_sbatch",
+        return_value=SubmitResult(job_id="123", account_stripped=False),
+    )
+    def test_submits_three_job_chain(
         self, mock_sbatch, _mock_validate, sample_config_file
     ):
-        # The v2 search array is not implemented, so run_generate_multinode
-        # omits "search" and the dependency chain must not be submitted.
+        # v2 submits prepare -> search -> resume as a dependency chain.
         f = sample_config_file
         run_submit_multinode(
             config_path=f["config_path"],
             script_dir=str(f["tmp_path"] / "scripts"),
             skip_confirm=True,
         )
-        mock_sbatch.assert_not_called()
+        assert mock_sbatch.call_count == 3
+        # search + resume are submitted with a dependency on the prior job.
+        search_call, resume_call = mock_sbatch.call_args_list[1:3]
+        assert search_call.kwargs.get("dependency") == "123"
+        assert resume_call.kwargs.get("dependency") == "123"

@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
+from convgeno.slurm.config import (
+    MultinodeConfig,
+    PipelineConfig,
+    SlurmConfig,
+    normalize_optional_account,
+)
 
 
 class TestSlurmConfigFromDict:
@@ -228,3 +233,46 @@ class TestScratchConfig:
 
         assert restored.scratch_dir == "/local/scratch"
         assert restored.is_ephemeral_scratch is True
+
+
+class TestMultinodeConfig:
+    def test_defaults_all_none_and_empty_dict(self):
+        mn = MultinodeConfig()
+        assert mn.throughput_const is None
+        assert mn.to_dict() == {}  # None fields omitted
+
+    def test_to_dict_omits_none(self):
+        mn = MultinodeConfig(waves=6, throughput_const=1.23e12)
+        assert mn.to_dict() == {"waves": 6, "throughput_const": 1.23e12}
+
+    def test_from_dict_ignores_unknown_keys(self):
+        mn = MultinodeConfig.from_dict(
+            {"waves": 3, "search_cpus": 20, "future_knob": "ignored"}
+        )
+        assert mn.waves == 3
+        assert mn.search_cpus == 20
+
+    def test_pipeline_config_roundtrip_with_multinode(self, tmp_path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            multinode=MultinodeConfig(
+                array_throttle=12, throughput_const=5e11, search_mem="24000M"
+            ),
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.multinode is not None
+        assert loaded.multinode.array_throttle == 12
+        assert loaded.multinode.throughput_const == 5e11
+        assert loaded.multinode.search_mem == "24000M"
+
+    def test_pipeline_config_roundtrip_without_multinode(self, tmp_path):
+        cfg = PipelineConfig(
+            project_dir="/p", slurm=SlurmConfig(partition="hawkcpu")
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.multinode is None

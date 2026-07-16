@@ -21,8 +21,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from convgeno.slurm.config import PipelineConfig, normalize_optional_account
-from convgeno.slurm.discovery import detect_max_array_size, detect_qos_max_jobs
+from convgeno.slurm.config import (
+    MultinodeConfig,
+    PipelineConfig,
+    normalize_optional_account,
+)
+from convgeno.slurm.discovery import (
+    detect_max_array_size,
+    detect_node_cpus,
+    detect_qos_max_jobs,
+)
 from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
@@ -210,15 +218,20 @@ def _proteome_volume(input_dir: str) -> tuple[int, int, int]:
 def generate_prepare_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
+    sizing: SearchArraySizing | None = None,
 ) -> str:
     """Generate SLURM script for OrthoFinder's prepare phase (``-op``).
 
-    Runs on a single node. Captures the DIAMOND/BLAST commands to a file
-    for the array job.
+    Runs on a single node. Captures the DIAMOND/BLAST commands to a file, then
+    builds the balanced per-task search manifest so the array job can consume
+    it. The bucket count ``T`` is taken from ``sizing`` (derived once and shared
+    with the search-array script so the manifest and ``--array`` width agree).
     """
     _validate_has_orthofinder(config)
     assert config.orthofinder is not None  # for type checker
     resolved_runtime = _resolve_runtime(config, runtime)
+    if sizing is None:
+        sizing = derive_search_array_sizing(config)
 
     # Derive prepare resources from the proteome volume at generate time
     # (SBATCH headers are static). Fall back to safe defaults when the inputs
@@ -476,6 +489,23 @@ fi
 
 echo "Search commands (blastp only, n^2=$EXPECTED_SEARCHES) -> $SEARCH_COMMANDS_FILE"
 echo "-------------------------------------------------"
+
+# ------------------------------------------------------------
+# Build the balanced per-task search manifest (LPT) for the array job.
+# T (task count) is fixed at generate time so the array width matches exactly.
+# ------------------------------------------------------------
+MANIFEST_DIR="$OUTPUT_PARENT/${{RUN_NAME}}{_SEARCH_MANIFEST_DIRNAME_SUFFIX}"
+SEARCH_TASKS={sizing.tasks}
+echo "Building balanced search manifest: $SEARCH_TASKS tasks -> $MANIFEST_DIR"
+if ! python -m convgeno.slurm.build_search_manifest \\
+        --search-commands "$SEARCH_COMMANDS_FILE" \\
+        --work-dir "$WORK_DIR" \\
+        --manifest-dir "$MANIFEST_DIR" \\
+        --tasks "$SEARCH_TASKS"; then
+    echo "ERROR: failed to build the search manifest; aborting prepare." >&2
+    exit 1
+fi
+echo "Search manifest ready in $MANIFEST_DIR"
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -745,6 +775,9 @@ def build_search_commands(
 
 _SEARCH_MANIFEST_PREFIX = "search_task_"
 _SEARCH_MANIFEST_SUFFIX = ".txt"
+# Manifest directory basename suffix (appended to RUN_NAME). Shared contract
+# between the prepare glue (writes here) and the search array (reads here).
+_SEARCH_MANIFEST_DIRNAME_SUFFIX = "_search_manifests"
 
 
 def search_task_manifest_name(task_id: int) -> str:
@@ -1063,21 +1096,411 @@ def derive_search_memory_mb(
     return max(_SEARCH_MEM_FLOOR_MB, int(rounded))
 
 
+# ------------------------------------------------------------
+# Generate-time search-array sizing (one bundle: C, W, K, T, time, mem)
+# ------------------------------------------------------------
+# The search script's SBATCH header is static (written at generate time,
+# before prepare runs), so its sizing is derived NOW from the INPUT FASTA
+# sizes + cluster discovery -- exactly the inputs the plan calls for. T is
+# deterministic (K*W clamped by n^2/MaxArraySize), so the same T is baked into
+# the prepare script (for the manifest) and here (for --array): the manifest
+# and the array width always agree. The --time/--mem values are ESTIMATES from
+# input sizes (real Species*.fa sizes drive the actual manifest at prepare
+# time, but the header only needs a sized-with-margin walltime/memory).
+
+_SEARCH_FALLBACK_MEM = "16000M"  # off-cluster / no-size fallback only
+
+
+def _input_fasta_sizes(input_dir: str) -> list[int]:
+    """Byte sizes of the proteome FASTAs in ``input_dir`` (empty if unreadable)."""
+    try:
+        directory = Path(input_dir)
+        if not directory.is_dir():
+            return []
+        return [
+            entry.stat().st_size
+            for entry in directory.iterdir()
+            if entry.is_file() and entry.suffix.lower() in _FASTA_EXTENSIONS
+        ]
+    except OSError:
+        return []
+
+
+def build_all_pairs_search_commands(sizes: list[int]) -> list[SearchCommand]:
+    """All ``n^2`` ordered species pairs as ``SearchCommand``s from proteome sizes.
+
+    ``line_index`` is a synthetic enumeration (not tied to a real commands
+    file); this feeds the generate-time LPT cost/mem ESTIMATE only, when the
+    emitted commands don't exist yet. The real manifest is built at prepare
+    time from ``_search_commands.txt`` via :func:`build_search_commands`.
+    """
+    commands: list[SearchCommand] = []
+    idx = 0
+    for query in sizes:
+        for db in sizes:
+            commands.append(
+                SearchCommand(line_index=idx, query_bytes=query, db_bytes=db)
+            )
+            idx += 1
+    return commands
+
+
+@dataclass(frozen=True)
+class SearchArraySizing:
+    """Derived search-array parameters for one generated script."""
+
+    cpus: int  # C -> --cpus-per-task
+    concurrency: int  # W -> --array ...%W throttle
+    waves: int  # K
+    tasks: int  # T -> --array=0-(T-1)
+    within_task_parallel: int  # C/p concurrent diamonds per task
+    threads_per_command: int  # p
+    time_limit: str  # per-task --time
+    mem: str  # per-task --mem
+
+
+def compute_search_array_sizing(
+    input_sizes: list[int],
+    max_cpus_per_node: int,
+    min_cpus_per_node: int,
+    qos_max_jobs: int | None,
+    max_array_size: int | None,
+    *,
+    fallback_time: str,
+    fallback_mem: str,
+    overrides: MultinodeConfig | None = None,
+) -> SearchArraySizing:
+    """Pure derivation of the whole C/W/K/T + time/mem bundle.
+
+    ``input_sizes`` are proteome FASTA byte sizes (empty off-cluster). All
+    cluster numbers are passed in so this stays subprocess-free and testable;
+    :func:`derive_search_array_sizing` is the discovery-backed wrapper.
+    ``overrides`` (a :class:`MultinodeConfig`) pins any value the user set.
+    """
+    mn = overrides or MultinodeConfig()
+    cpus = derive_search_cpus(
+        max_cpus_per_node, min_cpus_per_node, override=mn.search_cpus
+    )
+    concurrency = derive_search_concurrency(
+        override=mn.array_throttle, qos_max_jobs=qos_max_jobs
+    )
+    waves = derive_search_waves(override=mn.waves)
+    threads_per_command = mn.threads_per_command or 1
+    within = within_task_concurrency(cpus, threads_per_command)
+
+    n = len(input_sizes)
+    if n > 0:
+        tasks = derive_search_task_count(
+            n * n, concurrency, waves, max_array_size
+        )
+        lpt = lpt_partition(build_all_pairs_search_commands(input_sizes), tasks)
+        max_bucket_cost = lpt.max_bucket_cost
+        mem_determinant = lpt.mem_determinant_bytes
+    else:
+        # Off-cluster / no data: still size the array, fall back on time/mem.
+        base = waves * concurrency
+        tasks = min(base, max_array_size) if max_array_size else base
+        tasks = max(1, tasks)
+        max_bucket_cost = 0
+        mem_determinant = 0
+
+    throughput = mn.throughput_const or _SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC
+    margin = mn.time_margin or _SEARCH_TIME_MARGIN
+
+    if mn.search_time_limit:
+        time_limit = mn.search_time_limit
+    else:
+        time_limit = (
+            derive_search_walltime(max_bucket_cost, cpus, throughput, margin)
+            or fallback_time
+        )
+
+    if mn.search_mem:
+        mem = mn.search_mem
+    else:
+        mem_mb = derive_search_memory_mb(mem_determinant, within)
+        mem = f"{mem_mb}M" if mem_mb is not None else fallback_mem
+
+    return SearchArraySizing(
+        cpus=cpus,
+        concurrency=concurrency,
+        waves=waves,
+        tasks=tasks,
+        within_task_parallel=within,
+        threads_per_command=threads_per_command,
+        time_limit=time_limit,
+        mem=mem,
+    )
+
+
+def derive_search_array_sizing(config: PipelineConfig) -> SearchArraySizing:
+    """Discovery-backed :func:`compute_search_array_sizing` for *config*.
+
+    Probes the partition (node CPUs, QOS ``MaxJobs``, ``MaxArraySize``) and
+    reads the input FASTA sizes, then defers to the pure computation. All
+    probes degrade to safe fallbacks off-cluster.
+    """
+    node = detect_node_cpus(config.slurm.partition)
+    input_sizes = (
+        _input_fasta_sizes(config.orthofinder.input_dir)
+        if config.orthofinder is not None
+        else []
+    )
+    return compute_search_array_sizing(
+        input_sizes,
+        max_cpus_per_node=node.get("max_cpus_per_node", 0),
+        min_cpus_per_node=node.get("min_cpus_per_node", 0),
+        qos_max_jobs=detect_qos_max_jobs(config.slurm.partition),
+        max_array_size=detect_max_array_size(),
+        fallback_time=config.slurm.time_limit,
+        fallback_mem=config.slurm.mem or _SEARCH_FALLBACK_MEM,
+        overrides=config.multinode,
+    )
+
+
+# Reusable bash helpers embedded in the search-array script. Kept as raw
+# module constants (not f-strings) so their shell ``{}``/``$`` need no escaping.
+
+# Resolve a writable scratch base (self-heal owner-write, then write-probe).
+# Lifted from the single-node generator so both paths behave identically.
+_RESOLVE_SCRATCH_FUNC = r"""
+resolve_scratch_base() {
+    local base="$1"
+    if [ -d "$base" ] && [ ! -w "$base" ] && [ -O "$base" ]; then
+        chmod u+w "$base" 2>/dev/null || true
+    fi
+    mkdir -p "$base" 2>/dev/null || true
+    if [ -d "$base" ]; then
+        local probe="$base/.convgeno_wtest.$$"
+        if ( : > "$probe" ) 2>/dev/null; then
+            rm -f "$probe"
+            printf '%s' "$base"
+            return 0
+        fi
+    fi
+    return 1
+}
+"""
+
+# Per-command worker (run concurrently via xargs -P). Idempotent skip on a
+# valid existing Blast{i}_{j}.txt.gz in the shared WorkingDirectory; otherwise
+# run the emitted diamond command with its -o directory redirected to
+# $OUTPUT_BASE (scratch or the WorkingDirectory) -- inputs (-q/-d) stay shared.
+# Never returns non-zero (so xargs runs the whole bucket); outcome is recorded
+# as a marker file the parent counts.
+_RUN_ONE_FUNC = r"""
+run_one() {
+    local CMD="$1"
+    local PAIR
+    if [[ "$CMD" =~ Blast([0-9]+)_([0-9]+) ]]; then
+        PAIR="${BASH_REMATCH[0]}"
+    else
+        : > "$STATUS_DIR/failed/noblast_$$_$RANDOM"
+        return 0
+    fi
+    local FINAL="$WORK_DIR/${PAIR}.txt.gz"
+    if [ -s "$FINAL" ] && gzip -t "$FINAL" 2>/dev/null; then
+        : > "$STATUS_DIR/skipped/$PAIR"
+        return 0
+    fi
+    local RUN
+    RUN="$(printf '%s' "$CMD" | sed -E "s#(-o[[:space:]]+)[^[:space:]]*/([^/[:space:]]+)#\1$OUTPUT_BASE/\2#")"
+    if eval "$RUN" >/dev/null 2>&1; then
+        : > "$STATUS_DIR/ran/$PAIR"
+    else
+        : > "$STATUS_DIR/failed/$PAIR"
+    fi
+    return 0
+}
+export -f run_one
+"""
+
+
 def generate_search_array_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
+    sizing: SearchArraySizing | None = None,
 ) -> str:
-    """Generate the SLURM array job for the OrthoFinder search phase.
+    """Generate the SLURM array job for the OrthoFinder search phase (v2).
 
-    The v1 search array has been removed. The v2 implementation (LPT-balanced
-    buckets, derived C/W/K/T sizing, within-task ``C/p`` concurrency, idempotent
-    ``Blast`` skip) is not yet built — see the plan's "Search-array sizing"
-    section.
+    A backfill-friendly array of ``T`` LPT-balanced tasks (``--array=0-(T-1)%W``,
+    ``--cpus-per-task=C``). Each task reads its manifest
+    (``search_task_<id>.txt``) and runs ``C/p`` raw ``diamond blastp`` commands
+    concurrently, idempotently skipping any valid existing ``Blast{i}_{j}.txt.gz``.
+
+    Outputs are written to scratch (when ``slurm.scratch_dir`` is set: preferred
+    scratch -> ``/tmp`` -> **direct-to-shared** if neither is writable) and
+    rsynced back to the WorkingDirectory, with a SIGTERM/SIGINT salvage trap and
+    ephemeral/persistent cleanup -- the single-node scratch pattern. Sizing is
+    derived once (or passed in for consistency with the prepare script).
     """
-    raise NotImplementedError(
-        "Multi-node search array is being reimplemented (v2: LPT buckets + "
-        "derived C/W/K/T sizing). It is not yet available."
+    _validate_has_orthofinder(config)
+    assert config.orthofinder is not None
+    resolved_runtime = _resolve_runtime(config, runtime)
+    if sizing is None:
+        sizing = derive_search_array_sizing(config)
+
+    throttle = min(sizing.concurrency, sizing.tasks)
+    array_spec = f"0-{sizing.tasks - 1}%{throttle}"
+    array_output = config.slurm.output_pattern.replace("%j", "%A_%a")
+    array_error = config.slurm.error_pattern.replace("%j", "%A_%a")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = _build_sbatch_header(
+        config,
+        overrides={
+            "--job-name": "convgeno_of_search",
+            "--array": array_spec,
+            "--nodes": "1",
+            "--ntasks": "1",
+            "--cpus-per-task": str(sizing.cpus),
+            "--time": sizing.time_limit,
+            "--mem": sizing.mem,
+            "--mem-per-cpu": None,
+            "--output": array_output,
+            "--error": array_error,
+        },
     )
+    bootstrap_block = render_conda_bootstrap(resolved_runtime)
+
+    scratch_dir = config.slurm.scratch_dir
+    if scratch_dir is not None:
+        scratch_setup_block = f"""
+# ---- Scratch: write Blast outputs locally, rsync back to shared ----
+PREFERRED_SCRATCH="{scratch_dir}"
+FALLBACK_SCRATCH="/tmp/scratch"
+{_RESOLVE_SCRATCH_FUNC}
+SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
+if [ -z "$SCRATCH_BASE" ]; then
+    echo "WARNING: preferred scratch '$PREFERRED_SCRATCH' not writable; trying '$FALLBACK_SCRATCH'"
+    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
+fi
+if [ -n "$SCRATCH_BASE" ]; then
+    USE_SCRATCH=1
+    JOB_SCRATCH="$SCRATCH_BASE/${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}"
+    OUTPUT_BASE="$JOB_SCRATCH/blast_out"
+    export TMPDIR="$JOB_SCRATCH/tmp"
+    mkdir -p "$OUTPUT_BASE" "$TMPDIR"
+    echo "Scratch base: $SCRATCH_BASE (Blast outputs -> $OUTPUT_BASE)"
+    salvage_scratch() {{
+        trap - SIGTERM SIGINT
+        echo "Interrupted — salvaging Blast outputs from scratch to WorkingDirectory..."
+        rsync -a "$OUTPUT_BASE"/ "$WORK_DIR"/ 2>/dev/null || true
+    }}
+    trap salvage_scratch SIGTERM SIGINT
+else
+    USE_SCRATCH=0
+    OUTPUT_BASE="$WORK_DIR"
+    echo "No writable scratch; writing Blast outputs directly to the shared WorkingDirectory."
+fi
+"""
+        if config.slurm.is_ephemeral_scratch:
+            scratch_cleanup_block = """
+if [ "$USE_SCRATCH" = "1" ] && [ -d "$JOB_SCRATCH" ]; then
+    echo "Cleaning up ephemeral scratch: $JOB_SCRATCH"
+    rm -rf "$JOB_SCRATCH" || echo "WARNING: could not remove $JOB_SCRATCH (node reclaims it)"
+fi
+"""
+        else:
+            scratch_cleanup_block = """
+if [ "$USE_SCRATCH" = "1" ]; then
+    echo "Persistent scratch left in $JOB_SCRATCH (cluster purge policy reclaims it)."
+fi
+"""
+    else:
+        scratch_setup_block = """
+# ---- Scratch not configured: write directly to the shared WorkingDirectory ----
+USE_SCRATCH=0
+OUTPUT_BASE="$WORK_DIR"
+echo "Scratch not configured; writing Blast outputs directly to the shared WorkingDirectory."
+"""
+        scratch_cleanup_block = ""
+
+    script = f"""\
+#!/bin/bash
+# ============================================================
+# OrthoFinder search array (raw diamond blastp) — multi-node mode
+# Generated by convgeno on {timestamp}
+# ============================================================
+
+{header}
+
+set -uo pipefail
+
+{bootstrap_block}
+
+echo "============================================================"
+echo "convgeno: OrthoFinder search array task started"
+echo "Array job: ${{SLURM_ARRAY_JOB_ID:-?}}  Task: ${{SLURM_ARRAY_TASK_ID:-?}}"
+echo "Node:      $HOSTNAME"
+echo "Start:     $(date)"
+echo "============================================================"
+
+START_SECONDS=$SECONDS
+
+OUTPUT_DIR="{config.orthofinder.output_dir}"
+OUTPUT_PARENT="$(dirname "$OUTPUT_DIR")"
+RUN_NAME="$(basename "$OUTPUT_DIR")"
+WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
+MANIFEST_DIR="$OUTPUT_PARENT/${{RUN_NAME}}{_SEARCH_MANIFEST_DIRNAME_SUFFIX}"
+
+if [ ! -f "$WORK_DIR_FILE" ]; then
+    echo "ERROR: WorkingDirectory pointer not found: $WORK_DIR_FILE (prepare failed?)" >&2
+    exit 1
+fi
+WORK_DIR="$(cat "$WORK_DIR_FILE")"
+if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+    echo "ERROR: WorkingDirectory not found or unreadable: $WORK_DIR" >&2
+    exit 1
+fi
+
+TASK_MANIFEST="$MANIFEST_DIR/search_task_${{SLURM_ARRAY_TASK_ID}}.txt"
+if [ ! -f "$TASK_MANIFEST" ]; then
+    echo "ERROR: task manifest not found: $TASK_MANIFEST" >&2
+    echo "The prepare job builds these; check that it completed." >&2
+    exit 1
+fi
+{scratch_setup_block}
+STATUS_DIR="$(mktemp -d)"
+mkdir -p "$STATUS_DIR/ran" "$STATUS_DIR/skipped" "$STATUS_DIR/failed"
+
+{_RUN_ONE_FUNC}
+export WORK_DIR OUTPUT_BASE STATUS_DIR
+
+CONCURRENCY={sizing.within_task_parallel}
+N_CMDS=$(grep -c . "$TASK_MANIFEST" || true)
+echo "Task ${{SLURM_ARRAY_TASK_ID}}: $N_CMDS commands, $CONCURRENCY concurrent (C/p), writing to $OUTPUT_BASE"
+
+# Run the bucket: C/p diamonds at a time, one command per worker (NUL-delimited
+# so command spaces are preserved). Per-command outcomes are marker files.
+tr '\\n' '\\0' < "$TASK_MANIFEST" | xargs -0 -r -n1 -P "$CONCURRENCY" bash -c 'run_one "$1"' _
+
+if [ "$USE_SCRATCH" = "1" ]; then
+    echo "Copying Blast outputs: scratch -> WorkingDirectory"
+    rsync -a "$OUTPUT_BASE"/ "$WORK_DIR"/
+fi
+
+RAN=$(find "$STATUS_DIR/ran" -type f | wc -l)
+SKIPPED=$(find "$STATUS_DIR/skipped" -type f | wc -l)
+FAILED=$(find "$STATUS_DIR/failed" -type f | wc -l)
+
+ELAPSED=$(( SECONDS - START_SECONDS ))
+echo "============================================================"
+echo "convgeno: search task ${{SLURM_ARRAY_TASK_ID}} finished"
+echo "ran=$RAN skipped=$SKIPPED failed=$FAILED  (of $N_CMDS commands)"
+echo "Duration: ${{ELAPSED}}s   End: $(date)"
+echo "============================================================"
+
+rm -rf "$STATUS_DIR"
+{scratch_cleanup_block}
+if [ "$FAILED" -gt 0 ]; then
+    echo "ERROR: $FAILED search command(s) failed in task ${{SLURM_ARRAY_TASK_ID}}." >&2
+    echo "Fix the cause and resubmit this array id; completed Blast files are skipped." >&2
+    exit 1
+fi
+exit 0
+"""
+    return script
 
 
 def generate_resume_script(

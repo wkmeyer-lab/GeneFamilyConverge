@@ -19,8 +19,10 @@ class SubmitResult:
     job_id: str
     account_stripped: bool = False
 from convgeno.slurm.multinode_generator import (
+    derive_search_array_sizing,
     generate_prepare_script,
     generate_resume_script,
+    generate_search_array_script,
 )
 from convgeno.slurm.script_generator import generate_orthofinder_script, write_script
 from convgeno.validation.orthofinder_inputs import validate_orthofinder_inputs
@@ -317,20 +319,31 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
             print(f"ERROR: {exc}")
             sys.exit(1)
 
-    prepare_content = generate_prepare_script(config, config.runtime)
+    # Derive the search-array sizing ONCE and share it with both generators so
+    # the manifest bucket count (prepare) and the --array width (search) agree.
+    sizing = derive_search_array_sizing(config)
+    prepare_content = generate_prepare_script(config, config.runtime, sizing=sizing)
+    search_content = generate_search_array_script(config, config.runtime, sizing=sizing)
     resume_content = generate_resume_script(config, config.runtime)
 
     script_dir_path = Path(script_dir)
     prepare_path = write_script(prepare_content, script_dir_path / "orthofinder_prepare.sh")
+    search_path = write_script(search_content, script_dir_path / "orthofinder_search.sh")
     resume_path = write_script(resume_content, script_dir_path / "orthofinder_resume.sh")
 
+    throttle = min(sizing.concurrency, sizing.tasks)
     print(f"Multi-node SLURM scripts written to {script_dir}/")
     print(f"  Prepare: {prepare_path}")
+    print(
+        f"  Search:  {search_path}  "
+        f"(--array=0-{sizing.tasks - 1}%{throttle}, {sizing.cpus} cpus/task, "
+        f"--time {sizing.time_limit}, --mem {sizing.mem})"
+    )
     print(f"  Resume:  {resume_path}")
-    print("  Search:  NOT generated — the v2 search array is not yet implemented.")
 
     return {
         "prepare": prepare_path,
+        "search": search_path,
         "resume": resume_path,
     }
 
@@ -342,14 +355,6 @@ def run_submit_multinode(
 ) -> None:
     """Generate and submit the three-job multi-node OrthoFinder dependency chain."""
     paths = run_generate_multinode(config_path, script_dir)
-
-    if "search" not in paths:
-        print(
-            "\nThe multi-node search array (v2) is not yet implemented, so the "
-            "prepare -> search -> resume chain cannot be submitted yet.\n"
-            f"Prepare and resume scripts were written to: {script_dir}"
-        )
-        return
 
     if not skip_confirm:
         for role in ("prepare", "search", "resume"):
