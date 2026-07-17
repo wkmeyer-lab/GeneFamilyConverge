@@ -42,6 +42,7 @@ from convgeno.slurm.multinode_generator import (
     generate_search_array_script,
     lpt_partition,
     read_species_fasta_sizes,
+    read_species_ids,
     resolve_search_concurrency,
     resolve_search_task_count,
     search_task_manifest_name,
@@ -667,6 +668,19 @@ class TestResumeScript:
         assert "-T " not in script
         assert "dendroblast" in script  # the informational echo
 
+    def test_resume_runs_completeness_gate_before_b(self, sample_config):
+        # The gate must run, and must precede orthofinder -b so an incomplete
+        # search set never reaches the analysis.
+        script = generate_resume_script(sample_config)
+        assert "verify_search_complete" in script
+        gate = script.index("verify_search_complete")
+        resume = script.index('orthofinder -b "$WORK_DIR"')
+        assert gate < resume
+
+    def test_resume_gate_aborts_without_b(self, sample_config):
+        script = generate_resume_script(sample_config)
+        assert "not running orthofinder -b" in script
+
     def test_finds_working_directory(self, sample_config):
         assert "WorkingDirectory" in generate_resume_script(sample_config)
 
@@ -1110,6 +1124,31 @@ class TestReadSpeciesFastaSizes:
         (tmp_path / "SpeciesIDs.txt").write_text("nothing useful")
         with pytest.raises(FileNotFoundError, match="No Species"):
             read_species_fasta_sizes(tmp_path)
+
+
+class TestReadSpeciesIds:
+    """Active species ids from SpeciesIDs.txt (commented species excluded)."""
+
+    def test_reads_active_ids_sorted(self, tmp_path):
+        (tmp_path / "SpeciesIDs.txt").write_text(
+            "2: c.fa\n0: a.fa\n1: b.fa\n"
+        )
+        assert read_species_ids(tmp_path) == [0, 1, 2]
+
+    def test_skips_commented_species(self, tmp_path):
+        (tmp_path / "SpeciesIDs.txt").write_text(
+            "0: a.fa\n#1: removed.fa\n2: c.fa\n"
+        )
+        assert read_species_ids(tmp_path) == [0, 2]
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="SpeciesIDs.txt"):
+            read_species_ids(tmp_path)
+
+    def test_no_active_species_raises(self, tmp_path):
+        (tmp_path / "SpeciesIDs.txt").write_text("#0: a.fa\n\n")
+        with pytest.raises(ValueError, match="No active species"):
+            read_species_ids(tmp_path)
 
 
 class TestDeriveSearchCpus:

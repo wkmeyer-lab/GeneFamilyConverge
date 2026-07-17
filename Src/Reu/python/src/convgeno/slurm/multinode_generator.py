@@ -663,6 +663,9 @@ _QUERY_SPECIES_RE = re.compile(r"(?<![A-Za-z])Species(\d+)\.fa")
 _DB_SPECIES_RE = re.compile(r"diamondDBSpecies(\d+)")
 # Match an exact `Species<id>.fa` filename (for reading proteome sizes).
 _SPECIES_FASTA_FILE_RE = re.compile(r"^Species(\d+)\.fa$")
+# Match an active species line in SpeciesIDs.txt (`<id>: filename`). Removed
+# species are commented out (`#...`) and do not match.
+_SPECIES_IDS_LINE_RE = re.compile(r"^(\d+):")
 
 
 def _parse_species_pair(command: str) -> tuple[int, int]:
@@ -720,6 +723,27 @@ def read_species_fasta_sizes(work_dir: Path) -> dict[int, int]:
             f"{work_dir}"
         )
     return sizes
+
+
+def read_species_ids(work_dir: Path) -> list[int]:
+    """Active species ids from ``WorkingDirectory/SpeciesIDs.txt`` (ascending).
+
+    Each active species is a line ``<id>: filename``; removed species are
+    commented out and skipped. The expected search set is every ordered pair
+    ``(i, j)`` over these ids. Raises ``FileNotFoundError`` if the file is
+    absent, ``ValueError`` if it contains no active species.
+    """
+    path = Path(work_dir) / "SpeciesIDs.txt"
+    if not path.is_file():
+        raise FileNotFoundError(f"SpeciesIDs.txt not found in {work_dir}")
+    ids: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _SPECIES_IDS_LINE_RE.match(line.strip())
+        if match is not None:
+            ids.append(int(match.group(1)))
+    if not ids:
+        raise ValueError(f"No active species in {path}")
+    return sorted(ids)
 
 
 def build_search_commands(
@@ -1608,6 +1632,21 @@ WORK_DIR="$(cat "$WORK_DIR_FILE")"
 
 if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
     echo "ERROR: WorkingDirectory not found or unreadable: $WORK_DIR"
+    exit 1
+fi
+
+# ---- Completeness gate ----
+# Every one of the n^2 Blast{{i}}_{{j}}.txt.gz results must exist before -b, or
+# OrthoFinder would silently build orthogroups from an incomplete search set.
+# On failure this prints the missing pairs + a ready-to-paste resubmit line and
+# aborts WITHOUT running -b (results untouched).
+MANIFEST_DIR="$OUTPUT_PARENT/${{RUN_NAME}}{_SEARCH_MANIFEST_DIRNAME_SUFFIX}"
+echo "Verifying search completeness before resume..."
+if ! python -m convgeno.slurm.verify_search_complete \\
+        --work-dir "$WORK_DIR" \\
+        --manifest-dir "$MANIFEST_DIR" \\
+        --search-script "orthofinder_search.sh"; then
+    echo "ERROR: search phase is incomplete; not running orthofinder -b." >&2
     exit 1
 fi
 
