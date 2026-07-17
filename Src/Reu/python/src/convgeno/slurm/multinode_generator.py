@@ -1633,6 +1633,79 @@ def generate_resume_script(
         method_args = ""
     method_display = method_args.strip() or "(OrthoFinder default: dendroblast)"
 
+    # Temp/pickle placement. The bulk (WorkingDirectory + Results) is read and
+    # written IN PLACE on the shared filesystem; only OrthoFinder's small-file
+    # temp/pickle churn (-p + TMPDIR) is optionally routed to scratch. The n^2
+    # Blast set is never copied to node-local. Reuses the single-node scratch
+    # machinery INCLUDING its cleanup rule: node-local (ephemeral) scratch is
+    # removed; persistent shared scratch is LEFT for the cluster's purge policy.
+    scratch_dir = config.slurm.scratch_dir
+    if scratch_dir is None:
+        # No scratch: OrthoFinder temp on a project-local dir (shared); this is
+        # the project's own space (no purge policy), so remove it on success.
+        tmp_trap_block = ""
+        tmp_cleanup_success = (
+            'echo "Removing temp: $OF_TMP"\n    rm -rf "$OF_TMP" || true'
+        )
+        tmp_cleanup_failure = 'echo "Preserving temp for debugging: $OF_TMP"'
+        resume_tmp_block = """\
+# ---- Temp/pickle location (shared; no scratch_dir configured) ----
+OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"
+export TMPDIR="$OF_TMP"
+mkdir -p "$TMPDIR"
+echo "OrthoFinder temp/pickle: $OF_TMP\""""
+    else:
+        if config.slurm.is_ephemeral_scratch:
+            # Node-local (ephemeral) scratch -> safe to remove (the node
+            # reclaims it anyway); salvage trap removes it on interruption too.
+            tmp_trap_block = """\
+    salvage_tmp() {
+        trap - SIGTERM SIGINT
+        echo "Interrupted -- removing node-local temp (Results remain on shared)..."
+        rm -rf "$OF_TMP" 2>/dev/null || true
+    }
+    trap salvage_tmp SIGTERM SIGINT
+"""
+            tmp_cleanup_success = (
+                'echo "Removing node-local temp: $OF_TMP"\n'
+                '    rm -rf "$OF_TMP" || true'
+            )
+            tmp_cleanup_failure = (
+                'echo "Node-local temp ($OF_TMP) is reclaimed when the node is'
+                ' released."'
+            )
+        else:
+            # Persistent shared scratch -> DO NOT remove; the cluster purge
+            # policy reclaims it (mirrors the single-node persistent cleanup).
+            # No salvage trap: never rm persistent scratch, even on interruption.
+            tmp_trap_block = ""
+            tmp_cleanup_success = (
+                'echo "Persistent scratch temp left in $OF_TMP (cluster purge'
+                ' policy reclaims it; not removed)."'
+            )
+            tmp_cleanup_failure = (
+                'echo "Persistent scratch temp left in $OF_TMP for debugging."'
+            )
+        resume_tmp_block = f"""\
+# ---- Temp/pickle location (bulk stays shared; churn to scratch) ----
+SHARED_TMP="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
+PREFERRED_SCRATCH="{scratch_dir}"
+FALLBACK_SCRATCH="/tmp/scratch"
+{_RESOLVE_SCRATCH_FUNC}
+SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
+if [ -z "$SCRATCH_BASE" ]; then
+    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
+fi
+if [ -n "$SCRATCH_BASE" ]; then
+    OF_TMP="$SCRATCH_BASE/${{SLURM_JOB_ID}}_of_tmp"
+    echo "OrthoFinder temp/pickle -> scratch: $OF_TMP (base $SCRATCH_BASE)"
+{tmp_trap_block}else
+    OF_TMP="$SHARED_TMP"
+    echo "No writable scratch; OrthoFinder temp/pickle on shared: $OF_TMP"
+fi
+export TMPDIR="$OF_TMP"
+mkdir -p "$TMPDIR\""""
+
     script = f"""\
 #!/bin/bash
 # ============================================================
@@ -1696,7 +1769,7 @@ fi
 # step (issue #571). Raise THIS shell's soft limit to that requirement so the
 # orthofinder child below inherits it; fail fast if the node's hard cap is
 # lower. -a is NOT reduced here (it is a memory knob, not the fd lever). The
-# required_r formula matches convgeno.slurm.multinode_generator.compute_required_open_files.
+# required_r formula matches the compute_required_open_files Python helper.
 N_SPECIES=$(grep -cE '^[0-9]+:' "$WORK_DIR/SpeciesIDs.txt" || true)
 if [ -z "$N_SPECIES" ] || [ "$N_SPECIES" -lt 1 ]; then
     echo "ERROR: could not read species count from $WORK_DIR/SpeciesIDs.txt" >&2
@@ -1721,10 +1794,7 @@ else
     exit 1
 fi
 
-# ---- Project-local TMPDIR ----
-export TMPDIR="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
-mkdir -p "$TMPDIR"
-echo "TMPDIR=$TMPDIR"
+{resume_tmp_block}
 
 TOTAL_THREADS={config.orthofinder.search_threads}
 ANALYSIS_THREADS={analysis_threads}
@@ -1733,11 +1803,15 @@ echo "Resuming OrthoFinder from: $WORK_DIR"
 echo "Search threads (-t): $TOTAL_THREADS"
 echo "Analysis threads (-a): $ANALYSIS_THREADS"
 echo "Gene-tree method:    {method_display}"
+echo "Pickle/temp dir (-p): $OF_TMP"
 echo ""
 
-orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS"{method_args}{extra_suffix}
-
+# Run under 'set +e' so a non-zero exit is captured (not aborted by set -e),
+# letting the cleanup below run and the exit code propagate.
+set +e
+orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS" -p "$OF_TMP"{method_args}{extra_suffix}
 OF_EXIT=$?
+set -e
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -1753,8 +1827,8 @@ echo "Duration:  ${{HOURS}}h ${{MINUTES}}m ${{SECS}}s"
 echo "============================================================"
 
 if [ "$OF_EXIT" -eq 0 ]; then
-    echo "OrthoFinder completed successfully. Cleaning up TMPDIR: $TMPDIR"
-    rm -rf "$TMPDIR"
+    echo "OrthoFinder completed successfully."
+    {tmp_cleanup_success}
 
     if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
         echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
@@ -1762,8 +1836,10 @@ if [ "$OF_EXIT" -eq 0 ]; then
     fi
 
     echo "OrthoFinder multi-node run completed successfully."
+    echo "Results are in place on the shared output directory: $OUTPUT_DIR"
 else
-    echo "OrthoFinder exited with code $OF_EXIT. Preserving TMPDIR for debugging: $TMPDIR"
+    echo "OrthoFinder exited with code $OF_EXIT."
+    {tmp_cleanup_failure}
 fi
 
 exit "$OF_EXIT"

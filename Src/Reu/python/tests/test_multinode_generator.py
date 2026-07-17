@@ -901,19 +901,21 @@ class TestResumeScriptTmpdirAndThreads:
         assert "8192" not in script
         assert "REQUESTED_OPEN_FILE_LIMIT" not in script
 
-    def test_resume_sets_tmpdir(self, config_threads_unset):
+    def test_resume_sets_tmpdir_shared_when_no_scratch(self, config_threads_unset):
+        # config_threads_unset has no scratch_dir -> temp on shared, in place.
         script = generate_resume_script(config_threads_unset)
-        assert 'export TMPDIR="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
-        assert 'mkdir -p "$TMPDIR"' in script
+        assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+        assert 'export TMPDIR="$OF_TMP"' in script
+        assert "resolve_scratch_base" not in script  # no scratch machinery
 
-    def test_resume_cleans_tmpdir_on_success(self, config_threads_unset):
+    def test_resume_cleans_tmp_on_success(self, config_threads_unset):
         script = generate_resume_script(config_threads_unset)
-        assert 'rm -rf "$TMPDIR"' in script
-        assert "Cleaning up TMPDIR" in script
+        assert 'rm -rf "$OF_TMP"' in script
+        assert "Removing temp" in script
 
-    def test_resume_preserves_tmpdir_on_failure(self, config_threads_unset):
+    def test_resume_preserves_tmp_on_failure(self, config_threads_unset):
         script = generate_resume_script(config_threads_unset)
-        assert "Preserving TMPDIR for debugging" in script
+        assert "Preserving temp for debugging" in script
 
     def test_analysis_threads_default_to_1_when_unset(self, config_threads_unset):
         # analysis_threads=None → -a falls back to 1 (no auto-heuristic)
@@ -947,6 +949,102 @@ class TestResumeScriptTmpdirAndThreads:
     def test_resume_exits_with_of_exit(self, config_threads_unset):
         script = generate_resume_script(config_threads_unset)
         assert 'exit "$OF_EXIT"' in script
+
+    def test_resume_captures_exit_under_set_plus_e(self, config_threads_unset):
+        # -b runs under 'set +e' so a non-zero exit is captured, not aborted,
+        # letting the cleanup run and OF_EXIT propagate.
+        script = generate_resume_script(config_threads_unset)
+        assert "set +e" in script
+        of = script.index('orthofinder -b "$WORK_DIR"')
+        assert script.rfind("set +e", 0, of) != -1  # set +e before the command
+
+
+class TestResumeScratch:
+    """Resume routes only -p/TMPDIR to scratch; bulk stays on shared."""
+
+    @pytest.fixture()
+    def scratch_config(self, sample_runtime) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=48,
+                mem="350400M",
+                scratch_dir="/local/scratch",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/in",
+                output_dir="/out/run",
+                search_threads=48,
+                analysis_threads=12,
+            ),
+            runtime=sample_runtime,
+        )
+
+    def test_reuses_resolve_scratch_base(self, scratch_config):
+        script = generate_resume_script(scratch_config)
+        assert "resolve_scratch_base" in script
+        assert 'PREFERRED_SCRATCH="/local/scratch"' in script
+        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+
+    def test_routes_pickle_and_tmpdir_to_scratch(self, scratch_config):
+        script = generate_resume_script(scratch_config)
+        assert 'OF_TMP="$SCRATCH_BASE/${SLURM_JOB_ID}_of_tmp"' in script
+        assert 'export TMPDIR="$OF_TMP"' in script
+        assert '-p "$OF_TMP"' in script  # OrthoFinder pickle dir
+
+    def test_bulk_stays_on_shared(self, scratch_config):
+        # -b runs against the shared WorkingDirectory in place; the n^2 Blast
+        # set is never rsynced/copied to scratch.
+        script = generate_resume_script(scratch_config)
+        assert 'orthofinder -b "$WORK_DIR"' in script
+        assert "$WORK_DIR" in script
+        assert "rsync" not in script  # no bulk staging in resume
+
+    def test_salvage_trap_removes_local_temp(self, scratch_config):
+        # scratch_config is ephemeral -> salvage trap removes node-local temp.
+        script = generate_resume_script(scratch_config)
+        assert "salvage_tmp" in script
+        assert "trap salvage_tmp SIGTERM SIGINT" in script
+
+    def test_ephemeral_scratch_is_removed(self, scratch_config):
+        # Ephemeral (node-local) scratch temp IS removed on cleanup.
+        script = generate_resume_script(scratch_config)
+        assert 'rm -rf "$OF_TMP"' in script
+        assert "Removing node-local temp" in script
+
+    def test_persistent_scratch_is_not_removed(self, sample_runtime):
+        # Persistent shared scratch temp must NOT be removed (purge policy
+        # reclaims it) -- mirrors the single-node persistent cleanup.
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=48,
+                mem="350400M",
+                scratch_dir="/share/ceph/scratch",
+                is_ephemeral_scratch=False,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/in",
+                output_dir="/out/run",
+                search_threads=48,
+                analysis_threads=12,
+            ),
+            runtime=sample_runtime,
+        )
+        script = generate_resume_script(cfg)
+        assert "resolve_scratch_base" in script  # scratch still used for -p/TMPDIR
+        assert 'rm -rf "$OF_TMP"' not in script  # persistent -> never removed
+        assert "purge policy reclaims it" in script
+        assert "salvage_tmp" not in script  # no interrupt-rm for persistent
+
+    def test_no_scratch_config_has_no_machinery(self, sample_config):
+        # sample_config has scratch_dir=None.
+        script = generate_resume_script(sample_config)
+        assert "resolve_scratch_base" not in script
+        assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
 
 
 class TestLptPartition:
