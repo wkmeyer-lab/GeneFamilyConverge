@@ -398,4 +398,4 @@ single-node OrthoFinder run would — just computed in parallel.
 
 Once the whole array completes, the resume job (Job 3) reads the
 `WorkingDirectory` pointer and runs `orthofinder -b` to finish clustering, tree
-inference, and orthologue assignment. That phase is documented separately.
+inference, and orthologue assignment — see [`resume-phase.md`](./resume-phase.md).
