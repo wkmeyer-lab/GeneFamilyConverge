@@ -100,7 +100,7 @@ class TestDefaultOrthoFinderOutputDir:
         )
 
         assert path == Path(
-            "/project/Data/processed/orthofinder_single_20260629_181530"
+            "/project/Data/processed/orthofinder_multinode_20260629_181530"
         )
 
 
@@ -174,8 +174,8 @@ class TestInitCreatesConfig:
         assert loaded.orthofinder.msa_program == "mafft"
         output_dir = Path(loaded.orthofinder.output_dir)
         assert output_dir.parent == tmp_path / "Data" / "processed"
-        assert output_dir.name.startswith("orthofinder_single_")
-        timestamp_suffix = output_dir.name.removeprefix("orthofinder_single_")
+        assert output_dir.name.startswith("orthofinder_multinode_")
+        timestamp_suffix = output_dir.name.removeprefix("orthofinder_multinode_")
         assert len(timestamp_suffix) == 15
         assert timestamp_suffix[8] == "_"
         assert timestamp_suffix[:8].isdigit()

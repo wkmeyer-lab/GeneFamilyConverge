@@ -81,13 +81,18 @@ def _default_orthofinder_output_dir(
     *,
     timestamp: str | None = None,
 ) -> Path:
-    """Return a fresh timestamped default output path for single-node OrthoFinder."""
+    """Return a fresh timestamped default OrthoFinder output path.
+
+    Named for the default execution mode (multinode). A single-node benchmark
+    run sits side-by-side under an ``orthofinder_single_<ts>`` dir (choose a
+    fresh ``output_dir`` for it).
+    """
     run_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     return (
         project_dir
         / "Data"
         / "processed"
-        / f"orthofinder_single_{run_timestamp}"
+        / f"orthofinder_multinode_{run_timestamp}"
     )
 
 
