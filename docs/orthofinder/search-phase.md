@@ -198,6 +198,82 @@ takes over only for unusually large databases.
 
 ---
 
+## Calibrating `throughput_const`
+
+`throughput_const` is the one input in the walltime model that is **measured**,
+not derived. The value shipped in the code is calibrated for Lehigh Sol
+(`hawkcpu`); on a different cluster you should recalibrate, because DIAMOND's
+speed depends on the CPU, the DIAMOND version, and the search settings. The kit
+under `tools/throughput-constant/` runs the experiment; you then record the
+result (see [Overriding it](#overriding-it)).
+
+### The experiment
+
+After the prepare phase has produced the emitted commands and the
+WorkingDirectory, the kit does the following:
+
+1. Randomly sample `N` (default 100) of the `n²` emitted `diamond blastp`
+   commands.
+2. Run each command **one at a time, single-threaded (`-p 1`)**, on a compute
+   node of the target partition, and time it. The output is redirected to a
+   scratch file, so the real `Blast{i}_{j}.txt.gz` results are never touched.
+3. For each command, compute `cost = bytes(Speciesᵢ.fa) · bytes(Speciesⱼ.fa)`
+   (the same cost model the generator uses) and report the cost-weighted
+   aggregate:
+
+   ```
+   throughput_const = Σ cost / Σ elapsed_seconds     (bytes² per core-second)
+   ```
+
+   along with the per-command min / median / max rates.
+
+The shipped default was calibrated on **2026-07-16, partition `hawkcpu`, node
+`hawk-a119`, N=100**: `throughput_const = 6.06e11` bytes²/core-second (the run
+summed 1.97×10¹⁶ cost-units over 32,467 core-seconds).
+
+### Why this constant is reliable
+
+Read three signals off the calibration output to judge whether the value is
+trustworthy:
+
+- **All sampled commands succeeded.** Every one of the 100 searches completed, so
+  the estimate is not skewed by a failure-biased subset.
+- **The aggregate and the per-command median agree.** Here the aggregate
+  (6.06e11) and the median (6.08e11) are within ~0.3% of each other. When those
+  two numbers are close, the cost-weighted aggregate is *representative* of
+  typical commands rather than being dragged around by a few outliers.
+- **The spread is moderate and expected.** The observed per-command rates ranged
+  from ~4.9e11 to ~7.7e11 (roughly −19% to +27% of the aggregate). A spread of
+  this size is normal for real DIAMOND searches, because runtime depends on more
+  than FASTA byte size — sequence composition, number of hits, and cache /
+  filesystem effects all contribute. A *tight* cluster around the aggregate,
+  together with the aggregate≈median check, is what tells you the single number
+  is a sound summary.
+
+### Overriding it
+
+Set your measured value in `pipeline_config.yaml`; the generator uses it in place
+of the built-in default (no code change):
+
+```yaml
+multinode:
+  throughput_const: 6.055387e11
+```
+
+To measure your own value, follow `tools/throughput-constant/README.md`.
+
+### Interpretation caveat
+
+The measurement is **isolated single-core**. When many single-threaded searches
+run concurrently on a full node, the effective per-core rate can drop (memory
+bandwidth, cache, filesystem contention). The walltime `margin` (default 1.5)
+absorbs this — do not shrink the constant further to compensate unless real
+search-array runs show the margin is insufficient. An over-estimate only costs
+queue time; an under-estimate risks a task timeout, which is recoverable (the
+resume completeness gate reports the missing searches and a resubmit line).
+
+---
+
 ## The manifest
 
 `write_task_manifests` writes one file per bucket into

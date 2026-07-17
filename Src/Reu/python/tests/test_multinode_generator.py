@@ -18,6 +18,7 @@ from convgeno.slurm.config import MultinodeConfig, PipelineConfig, SlurmConfig
 from convgeno.slurm.multinode_generator import (
     COMMAND_LINE_REGEX,
     COMMAND_LINE_REGEX_EXTRACT,
+    _SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC,
     LPTResult,
     SearchArraySizing,
     SearchCommand,
@@ -1744,3 +1745,29 @@ class TestComputeSearchArraySizing:
             [], 0, 0, None, None, fallback_time="1:00:00", fallback_mem="8000M"
         )
         assert isinstance(sizing, SearchArraySizing)
+
+    def test_default_throughput_is_the_calibrated_value(self):
+        # Calibrated 2026-07-16 on hawkcpu (N=100). A change here should be a
+        # deliberate recalibration, not an accidental revert to a placeholder.
+        assert _SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC == 6.055387e11
+
+    def test_throughput_const_override_changes_walltime(self):
+        # The multinode.throughput_const flag overrides the default and feeds
+        # the walltime: a higher rate -> a shorter per-task --time.
+        common = dict(
+            max_cpus_per_node=52,
+            min_cpus_per_node=15,
+            qos_max_jobs=None,
+            max_array_size=1001,
+            fallback_time="72:00:00",
+            fallback_mem="16000M",
+        )
+        sizes = [12_000_000] * 40
+        slow = compute_search_array_sizing(
+            sizes, overrides=MultinodeConfig(throughput_const=1e11), **common
+        )
+        fast = compute_search_array_sizing(
+            sizes, overrides=MultinodeConfig(throughput_const=5e11), **common
+        )
+        # HH:MM:SS strings compare correctly (same width, zero-padded).
+        assert slow.time_limit > fast.time_limit

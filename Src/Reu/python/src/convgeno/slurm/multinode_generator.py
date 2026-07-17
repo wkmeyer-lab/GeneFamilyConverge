@@ -1083,7 +1083,14 @@ def resolve_search_task_count(
 # set (seed index + query block) dwarfs the loaded DB, so DB size alone would
 # under-provision; db_safety only takes over for unusually large databases.
 
-_SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC = 1.0e12  # conservative; CALIBRATE
+# Diamond per-core throughput (bytes^2 / core-second) for the search walltime
+# model. Calibrated 2026-07-16 on Lehigh Sol (partition hawkcpu, node hawk-a119)
+# from 100 randomly sampled OrthoFinder DIAMOND searches run sequentially at
+# -p 1: aggregate sum(cost)/sum(time) = 6.06e11, with the per-command median
+# (6.08e11) within ~0.3% -- i.e. representative, not skewed by outliers.
+# Per-cluster override: MultinodeConfig.throughput_const. Recalibrate with
+# tools/throughput-constant/ (see docs/orthofinder/search-phase.md).
+_SEARCH_THROUGHPUT_BYTES2_PER_CORE_SEC = 6.055387e11
 _SEARCH_TIME_MARGIN = 1.5
 _SEARCH_TIME_MIN_SEC = 900  # 15 min floor (diamond startup + DB load + I/O)
 _SEARCH_TIME_MAX_SEC = 259200  # 72 h safety cap; hitting it => raise T
