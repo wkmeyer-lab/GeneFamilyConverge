@@ -626,6 +626,47 @@ class TestResumeScript:
         # program is already configured in WorkingDirectory by prepare phase.
         assert "-S diamond" not in generate_resume_script(sample_config)
 
+    def test_resume_passes_msa_tree_method(self, sample_config):
+        # sample_config uses OrthoFinder defaults msa=mafft, tree=fasttree, so
+        # the resume must select the MSA gene-tree method explicitly.
+        script = generate_resume_script(sample_config)
+        assert "-M msa -A mafft -T fasttree" in script
+
+    def test_resume_method_matches_single_node(self, sample_config):
+        # Scientific equivalence: the resume selects the SAME method/aligner/tree
+        # as the single-node command. Single-node passes the aligner via a shell
+        # variable (-A "$ORTHOFINDER_MSA_PROGRAM"), so compare effective values.
+        from convgeno.slurm.script_generator import generate_orthofinder_script
+
+        single = generate_orthofinder_script(sample_config)
+        resume = generate_resume_script(sample_config)
+        assert "-M msa -A mafft -T fasttree" in resume
+        assert "-M msa" in single
+        assert 'ORTHOFINDER_MSA_PROGRAM="mafft"' in single  # -A value
+        assert "-T fasttree" in single
+
+    def test_resume_omits_method_when_no_msa(self, sample_runtime):
+        # msa_program unset -> OrthoFinder's dendroblast default (no -M/-A/-T),
+        # matching the single-node behaviour for the same config.
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu", cpus_per_task=16),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/in",
+                output_dir="/out/run",
+                search_threads=16,
+                analysis_threads=8,
+                msa_program="",
+                tree_program="",
+            ),
+            runtime=sample_runtime,
+        )
+        script = generate_resume_script(cfg)
+        assert "-M msa" not in script
+        assert "-A " not in script
+        assert "-T " not in script
+        assert "dendroblast" in script  # the informational echo
+
     def test_finds_working_directory(self, sample_config):
         assert "WorkingDirectory" in generate_resume_script(sample_config)
 

@@ -1552,6 +1552,22 @@ def generate_resume_script(
     extra = " ".join(config.orthofinder.extra_args)
     extra_suffix = f" {extra}" if extra else ""
 
+    # Gene-tree method flags -- emitted IDENTICALLY to the single-node command
+    # (OrthoFinderConfig.to_command_args / script_generator._orthofinder_command_block)
+    # so the multinode resume produces the same orthogroups and trees. -M selects
+    # the method (msa vs OrthoFinder's default dendroblast); -A is the MSA program
+    # and -T the tree program, both used only under -M msa. When msa_program is
+    # unset the flags are omitted entirely and OrthoFinder uses its dendroblast
+    # default -- again matching single-node. -S is intentionally NOT passed: the
+    # search program is already fixed in the WorkingDirectory by the prepare job.
+    if config.orthofinder.msa_program:
+        method_args = f" -M msa -A {config.orthofinder.msa_program}"
+        if config.orthofinder.tree_program:
+            method_args += f" -T {config.orthofinder.tree_program}"
+    else:
+        method_args = ""
+    method_display = method_args.strip() or "(OrthoFinder default: dendroblast)"
+
     script = f"""\
 #!/bin/bash
 # ============================================================
@@ -1606,9 +1622,10 @@ ANALYSIS_THREADS={analysis_threads}
 echo "Resuming OrthoFinder from: $WORK_DIR"
 echo "Search threads (-t): $TOTAL_THREADS"
 echo "Analysis threads (-a): $ANALYSIS_THREADS"
+echo "Gene-tree method:    {method_display}"
 echo ""
 
-orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS"{extra_suffix}
+orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS"{method_args}{extra_suffix}
 
 OF_EXIT=$?
 
