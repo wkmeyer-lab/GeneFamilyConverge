@@ -434,6 +434,23 @@ if [ "$SEARCH_COUNT" -ne "$EXPECTED_SEARCHES" ]; then
     exit 1
 fi
 
+# Open-file (fd) feasibility pre-check -- fail fast before the ~long search.
+# The resume step opens ~n^2 files at once (issue #571). This runs on a compute
+# node in the target partition, so an infeasible run aborts here rather than at
+# resume (the resume step re-checks authoritatively on its own node). Same
+# required_r formula as compute_required_open_files.
+REQUIRED_R=$(( (N_SPECIES * N_SPECIES * 11 + 9) / 10 + 1024 ))
+HARD=$(ulimit -Hn)
+echo "Open-file pre-check: resume will need r >= $REQUIRED_R (this node hard cap: $HARD)"
+if [ "$HARD" != "unlimited" ] && [ "$REQUIRED_R" -gt "$HARD" ]; then
+    echo "ERROR: resume needs NOFILE >= $REQUIRED_R for $N_SPECIES species, but this" >&2
+    echo "  node's hard limit is only $HARD (issue #571: OrthoFinder opens ~n^2 files" >&2
+    echo "  in the orthologue step). Aborting before the search to avoid wasted work." >&2
+    echo "  Remedies: admin-raise NOFILE (limits.conf / slurm.conf), a higher-cap" >&2
+    echo "  partition, or a container that raises it." >&2
+    exit 1
+fi
+
 # (2) Databases: one per species (n). Build them here when OrthoFinder didn't.
 if [ "$OF_DB_MODE" = "emit_build_commands" ]; then
     if [ "$DB_BUILD_COUNT" -ne "$N_SPECIES" ]; then
@@ -744,6 +761,30 @@ def read_species_ids(work_dir: Path) -> list[int]:
     if not ids:
         raise ValueError(f"No active species in {path}")
     return sorted(ids)
+
+
+# Open-file requirement for resume: ceil(n^2 * 1.1) + 1024. n^2 * 11/10 keeps
+# the ceil in exact integer arithmetic so this matches the bash computation in
+# the generated scripts exactly.
+_OPEN_FILE_MARGIN_NUM = 11
+_OPEN_FILE_MARGIN_DEN = 10
+_OPEN_FILE_HEADROOM = 1024
+
+
+def compute_required_open_files(n: int) -> int:
+    """Open file descriptors OrthoFinder's resume (``-b``) needs for ``n`` species.
+
+    During the orthologue/graph step OrthoFinder opens on the order of ``n²``
+    files at once (issue #571: 454 species needs r ≈ 206k). This returns
+    ``ceil(n² · 1.1) + 1024`` — the ``n²`` demand plus a 10% margin and a fixed
+    headroom. The resume script raises ``ulimit -n`` to this value (keeping full
+    ``-a``) or fails fast when the node's hard cap is lower. Integer arithmetic
+    throughout so it equals the bash computation in the generated scripts.
+    """
+    if n < 0:
+        raise ValueError(f"n must be >= 0, got {n}")
+    numerator = n * n * _OPEN_FILE_MARGIN_NUM + (_OPEN_FILE_MARGIN_DEN - 1)
+    return numerator // _OPEN_FILE_MARGIN_DEN + _OPEN_FILE_HEADROOM
 
 
 def build_search_commands(
@@ -1647,6 +1688,36 @@ if ! python -m convgeno.slurm.verify_search_complete \\
         --manifest-dir "$MANIFEST_DIR" \\
         --search-script "orthofinder_search.sh"; then
     echo "ERROR: search phase is incomplete; not running orthofinder -b." >&2
+    exit 1
+fi
+
+# ---- Open-file (fd) feasibility gate ----
+# OrthoFinder opens on the order of n^2 files at once during the orthologue
+# step (issue #571). Raise THIS shell's soft limit to that requirement so the
+# orthofinder child below inherits it; fail fast if the node's hard cap is
+# lower. -a is NOT reduced here (it is a memory knob, not the fd lever). The
+# required_r formula matches convgeno.slurm.multinode_generator.compute_required_open_files.
+N_SPECIES=$(grep -cE '^[0-9]+:' "$WORK_DIR/SpeciesIDs.txt" || true)
+if [ -z "$N_SPECIES" ] || [ "$N_SPECIES" -lt 1 ]; then
+    echo "ERROR: could not read species count from $WORK_DIR/SpeciesIDs.txt" >&2
+    exit 1
+fi
+REQUIRED_R=$(( (N_SPECIES * N_SPECIES * 11 + 9) / 10 + 1024 ))
+HARD=$(ulimit -Hn)
+echo "Open-file gate: $N_SPECIES species need r >= $REQUIRED_R (hard cap: $HARD)"
+if [ "$HARD" = "unlimited" ] || [ "$REQUIRED_R" -le "$HARD" ]; then
+    if ! ulimit -n "$REQUIRED_R" 2>/dev/null; then
+        echo "ERROR: failed to raise open-file soft limit to $REQUIRED_R (hard=$HARD)." >&2
+        exit 1
+    fi
+    echo "Open-file soft limit set to $(ulimit -Sn) (target $REQUIRED_R)."
+else
+    echo "ERROR: this run needs NOFILE >= $REQUIRED_R for $N_SPECIES species," >&2
+    echo "  but this node's hard limit is only $HARD." >&2
+    echo "  OrthoFinder opens ~n^2 files during the orthologue step (issue #571)." >&2
+    echo "  Remedies: have an admin raise NOFILE (/etc/security/limits.conf or" >&2
+    echo "  slurm.conf PropagateResourceLimits), target a higher-cap partition," >&2
+    echo "  or run in a container that raises it. Aborting before -b." >&2
     exit 1
 fi
 

@@ -25,6 +25,7 @@ from convgeno.slurm.multinode_generator import (
     _proteome_volume,
     build_all_pairs_search_commands,
     build_search_commands,
+    compute_required_open_files,
     compute_search_array_sizing,
     derive_prepare_cpus,
     derive_prepare_memory_mb,
@@ -681,6 +682,55 @@ class TestResumeScript:
         script = generate_resume_script(sample_config)
         assert "not running orthofinder -b" in script
 
+    def test_resume_raises_ulimit_before_b(self, sample_config):
+        # The fd gate must run (and set ulimit) before -b so orthofinder
+        # inherits the raised soft limit.
+        script = generate_resume_script(sample_config)
+        assert 'ulimit -n "$REQUIRED_R"' in script
+        assert "ulimit -Hn" in script
+        fd = script.index("Open-file gate")
+        resume = script.index('orthofinder -b "$WORK_DIR"')
+        assert fd < resume
+
+    def test_resume_fd_formula_matches_python(self, sample_config):
+        # The bash required_r arithmetic must equal compute_required_open_files.
+        script = generate_resume_script(sample_config)
+        assert "(N_SPECIES * N_SPECIES * 11 + 9) / 10 + 1024" in script
+
+    def test_resume_does_not_reduce_analysis_threads_for_fd(self, sample_config):
+        # -a stays full (from config); the fd fix is ulimit, not fewer threads.
+        script = generate_resume_script(sample_config)
+        assert "ANALYSIS_THREADS=8" in script  # sample_config analysis_threads=8
+
+
+class TestComputeRequiredOpenFiles:
+    """required_r = ceil(n^2 * 1.1) + 1024, exact integer arithmetic."""
+
+    def test_small_values(self):
+        assert compute_required_open_files(0) == 1024  # 0 + headroom
+        assert compute_required_open_files(1) == 1026  # ceil(1*1.1)=2, +1024
+
+    def test_formula_matches_ceil(self):
+        import math
+        from fractions import Fraction
+
+        # Exact rational reference — float ceil(n^2 * 1.1) mis-rounds when the
+        # product lands on an integer (e.g. 100*1.1 == 110.00000000000001).
+        for n in (2, 10, 114, 300):
+            expected = math.ceil(Fraction(n * n) * Fraction(11, 10)) + 1024
+            assert compute_required_open_files(n) == expected
+
+    def test_covers_issue_571_figure(self):
+        # Issue #571: 454 species need r ~= 206216. Our value must exceed it.
+        assert compute_required_open_files(454) >= 206216
+
+    def test_grows_quadratically(self):
+        assert compute_required_open_files(200) > compute_required_open_files(100)
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError, match="n must be"):
+            compute_required_open_files(-1)
+
     def test_finds_working_directory(self, sample_config):
         assert "WorkingDirectory" in generate_resume_script(sample_config)
 
@@ -844,13 +894,12 @@ class TestResumeScriptTmpdirAndThreads:
             runtime=sample_runtime,
         )
 
-    def test_resume_has_no_open_file_limit_logic(self, config_threads_unset):
-        # The old raise-to-8192 / if-else ulimit block was removed; the fd
-        # feasibility gate is reintroduced as a separate step.
+    def test_resume_has_no_v1_open_file_block(self, config_threads_unset):
+        # The v1 broken block (hardcoded raise-to-8192, -a tradeoff) must stay
+        # gone; the v2 fd gate (ulimit -n required_r ~= n^2) replaces it.
         script = generate_resume_script(config_threads_unset)
-        assert "ulimit -n" not in script
+        assert "8192" not in script
         assert "REQUESTED_OPEN_FILE_LIMIT" not in script
-        assert "Open-file limit" not in script
 
     def test_resume_sets_tmpdir(self, config_threads_unset):
         script = generate_resume_script(config_threads_unset)
