@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 import subprocess
 import sys
@@ -20,6 +19,7 @@ class SubmitResult:
     job_id: str
     account_stripped: bool = False
 from convgeno.slurm.multinode_generator import (
+    derive_search_array_sizing,
     generate_prepare_script,
     generate_resume_script,
     generate_search_array_script,
@@ -291,10 +291,11 @@ def run_submit(
 
 
 def run_generate_multinode(config_path: str, script_dir: str) -> dict:
-    """Load config, validate inputs, and generate the three multi-node scripts.
+    """Load config, validate inputs, and generate the multi-node scripts.
 
-    Returns a dict mapping script role (``"prepare"``, ``"search"``,
-    ``"resume"``) to the on-disk script path.
+    Returns a dict mapping script role to the on-disk script path. The v2
+    search array is not yet implemented, so only ``"prepare"`` and ``"resume"``
+    are generated; the search phase is reported as pending.
     """
     config = PipelineConfig.load(config_path)
 
@@ -304,12 +305,6 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
             "Run 'convgeno init' to detect and store conda paths."
         )
         sys.exit(1)
-
-    commands_per_task = 50
-    # Defensive default that yields a 1-task array. Only used if
-    # orthofinder is missing from config — generate_search_array_script
-    # will then raise ValueError on the missing orthofinder block first.
-    array_max = 0
 
     if config.orthofinder is not None:
         validation = validate_orthofinder_inputs(config.orthofinder.input_dir)
@@ -324,35 +319,26 @@ def run_generate_multinode(config_path: str, script_dir: str) -> dict:
             print(f"ERROR: {exc}")
             sys.exit(1)
 
-        # Compute the SLURM array range from the actual input size.
-        # OrthoFinder runs all-vs-all pairwise searches, so the upper
-        # bound on the number of search commands is num_species^2.
-        num_species = len(validation.fasta_files)
-        estimated_commands = num_species * num_species
-        array_task_count = max(math.ceil(estimated_commands / commands_per_task), 1)
-        array_max = array_task_count - 1
-
-        print(f"Estimated OrthoFinder search commands: {estimated_commands}")
-        print(f"Commands per array task: {commands_per_task}")
-        print(f"Generated SLURM array range: 0-{array_max}")
-
-    prepare_content = generate_prepare_script(config, config.runtime)
-    search_content = generate_search_array_script(
-        config,
-        commands_per_task=commands_per_task,
-        array_max=array_max,
-        runtime=config.runtime,
-    )
+    # Derive the search-array sizing ONCE and share it with both generators so
+    # the manifest bucket count (prepare) and the --array width (search) agree.
+    sizing = derive_search_array_sizing(config)
+    prepare_content = generate_prepare_script(config, config.runtime, sizing=sizing)
+    search_content = generate_search_array_script(config, config.runtime, sizing=sizing)
     resume_content = generate_resume_script(config, config.runtime)
 
     script_dir_path = Path(script_dir)
     prepare_path = write_script(prepare_content, script_dir_path / "orthofinder_prepare.sh")
-    search_path = write_script(search_content, script_dir_path / "orthofinder_search_array.sh")
+    search_path = write_script(search_content, script_dir_path / "orthofinder_search.sh")
     resume_path = write_script(resume_content, script_dir_path / "orthofinder_resume.sh")
 
+    throttle = min(sizing.concurrency, sizing.tasks)
     print(f"Multi-node SLURM scripts written to {script_dir}/")
     print(f"  Prepare: {prepare_path}")
-    print(f"  Search:  {search_path}")
+    print(
+        f"  Search:  {search_path}  "
+        f"(--array=0-{sizing.tasks - 1}%{throttle}, {sizing.cpus} cpus/task, "
+        f"--time {sizing.time_limit}, --mem {sizing.mem})"
+    )
     print(f"  Resume:  {resume_path}")
 
     return {

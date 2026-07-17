@@ -48,7 +48,6 @@ class SlurmConfig:
     mail_type: str = "END,FAIL"
     output_pattern: str = "logs/%x_%j.out"
     error_pattern: str = "logs/%x_%j.err"
-    open_file_limit: Optional[int] = None
     scratch_dir: str | None = None  # Scratch space root. None = run in output_dir.
     is_ephemeral_scratch: bool = False  # True when scratch is node-local.
     extra_sbatch_args: list[str] = field(default_factory=list)
@@ -129,6 +128,39 @@ class SlurmConfig:
 
 
 @dataclass(frozen=True)
+class MultinodeConfig:
+    """Optional overrides for multi-node search-array sizing.
+
+    Every field defaults to ``None`` meaning "auto-derive from cluster
+    discovery + proteome sizes". This block exists only so a user can pin
+    values in ``pipeline_config.yaml``; ``convgeno init`` adds no prompts for
+    it. ``throughput_const`` in particular is meant to be filled in with the
+    empirically-calibrated diamond rate after the first search run.
+    """
+
+    search_cpus: int | None = None  # C: cores per array task
+    array_throttle: int | None = None  # W: max concurrent tasks (%W)
+    waves: int | None = None  # K: T = K * W buckets
+    threads_per_command: int | None = None  # p in the emitted -p (expected 1)
+    throughput_const: float | None = None  # bytes^2 / core-second (calibrate!)
+    time_margin: float | None = None  # search walltime safety margin
+    search_time_limit: str | None = None  # per-task --time override
+    search_mem: str | None = None  # per-task --mem override
+
+    def to_dict(self) -> dict:
+        """Serialize, omitting ``None`` fields."""
+        return {
+            k: v for k, v in dataclasses.asdict(self).items() if v is not None
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> MultinodeConfig:
+        """Construct from a dict; unknown keys ignored for forward-compat."""
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline configuration combining project paths and SLURM settings."""
 
@@ -137,6 +169,7 @@ class PipelineConfig:
     slurm: SlurmConfig = field(default_factory=lambda: SlurmConfig(partition=""))
     orthofinder: Optional[OrthoFinderConfig] = None
     runtime: Optional[CondaRuntimeConfig] = None
+    multinode: Optional[MultinodeConfig] = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
@@ -149,6 +182,8 @@ class PipelineConfig:
         }
         if self.orthofinder is not None:
             data["orthofinder"] = self.orthofinder.to_dict()
+        if self.multinode is not None:
+            data["multinode"] = self.multinode.to_dict()
         if self.runtime is not None:
             data.update(runtime_config_to_dict(self.runtime))
         with open(path, "w", encoding="utf-8") as f:
@@ -182,10 +217,13 @@ class PipelineConfig:
         runtime_config = (
             runtime_config_from_dict(runtime_dict) if runtime_dict else None
         )
+        mn_dict = data.get("multinode")
+        mn_config = MultinodeConfig.from_dict(mn_dict) if mn_dict else None
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
             slurm=slurm_config,
             orthofinder=of_config,
             runtime=runtime_config,
+            multinode=mn_config,
         )

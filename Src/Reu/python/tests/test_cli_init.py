@@ -100,7 +100,7 @@ class TestDefaultOrthoFinderOutputDir:
         )
 
         assert path == Path(
-            "/project/Data/processed/orthofinder_single_20260629_181530"
+            "/project/Data/processed/orthofinder_multinode_20260629_181530"
         )
 
 
@@ -122,7 +122,6 @@ class TestInitCreatesConfig:
             "72:00:00",     # time limit
             "",             # mail user (skip)
             "",             # account (skip)
-            "",             # open_file_limit (default 8192)
             "",             # accept detected runtime defaults, if present
         ])
 
@@ -175,8 +174,8 @@ class TestInitCreatesConfig:
         assert loaded.orthofinder.msa_program == "mafft"
         output_dir = Path(loaded.orthofinder.output_dir)
         assert output_dir.parent == tmp_path / "Data" / "processed"
-        assert output_dir.name.startswith("orthofinder_single_")
-        timestamp_suffix = output_dir.name.removeprefix("orthofinder_single_")
+        assert output_dir.name.startswith("orthofinder_multinode_")
+        timestamp_suffix = output_dir.name.removeprefix("orthofinder_multinode_")
         assert len(timestamp_suffix) == 15
         assert timestamp_suffix[8] == "_"
         assert timestamp_suffix[:8].isdigit()
@@ -197,7 +196,6 @@ class TestInitCreatesConfig:
             "24:00:00",            # time limit
             "user@example.com",    # mail
             "myaccount",           # account
-            "",                    # open_file_limit (default 8192)
             "",                    # accept detected runtime defaults, if present
         ])
 
@@ -250,7 +248,6 @@ class TestInitCreatesConfig:
             "72:00:00",            # time limit
             "",                    # mail
             "",                    # account
-            "",                    # open_file_limit (default 8192)
             "",                    # accept detected runtime defaults, if present
         ])
 
@@ -310,7 +307,6 @@ class TestInitOverwriteBehaviour:
             "12:00:00",   # time
             "",           # mail (skip)
             "",           # account (skip)
-            "",           # open_file_limit (default 8192)
             "",           # accept detected runtime defaults, if present
         ])
 
@@ -363,7 +359,6 @@ class TestInitWarnings:
             "72:00:00",     # time
             "",             # mail
             "",             # account
-            "",             # open_file_limit (default 8192)
             "",             # accept detected runtime defaults, if present
         ])
 

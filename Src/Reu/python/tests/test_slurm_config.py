@@ -10,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
+from convgeno.slurm.config import (
+    MultinodeConfig,
+    PipelineConfig,
+    SlurmConfig,
+    normalize_optional_account,
+)
 
 
 class TestSlurmConfigFromDict:
@@ -195,42 +200,6 @@ class TestOptionalAccountHandling:
         assert not any("--account" in line for line in loaded.slurm.to_sbatch_lines())
 
 
-class TestOpenFileLimitConfig:
-    def test_default_is_none(self):
-        cfg = SlurmConfig(partition="hawkcpu")
-        assert cfg.open_file_limit is None
-
-    def test_from_dict_with_open_file_limit(self):
-        cfg = SlurmConfig.from_dict(
-            {"partition": "hawkcpu", "open_file_limit": 8192}
-        )
-        assert cfg.open_file_limit == 8192
-
-    def test_from_dict_without_open_file_limit(self):
-        cfg = SlurmConfig.from_dict({"partition": "hawkcpu"})
-        assert cfg.open_file_limit is None
-
-    def test_roundtrip_with_open_file_limit(self, tmp_path):
-        config = PipelineConfig(
-            project_dir="/project",
-            slurm=SlurmConfig(partition="hawkcpu", open_file_limit=16384),
-        )
-        path = tmp_path / "config.yaml"
-        config.save(path)
-        loaded = PipelineConfig.load(path)
-        assert loaded.slurm.open_file_limit == 16384
-
-    def test_roundtrip_null_open_file_limit(self, tmp_path):
-        config = PipelineConfig(
-            project_dir="/project",
-            slurm=SlurmConfig(partition="hawkcpu", open_file_limit=None),
-        )
-        path = tmp_path / "config.yaml"
-        config.save(path)
-        loaded = PipelineConfig.load(path)
-        assert loaded.slurm.open_file_limit is None
-
-
 class TestScratchConfig:
     def test_scratch_dir_in_to_dict(self):
         cfg = SlurmConfig(partition="hawkcpu", scratch_dir="/scratch/user")
@@ -264,3 +233,46 @@ class TestScratchConfig:
 
         assert restored.scratch_dir == "/local/scratch"
         assert restored.is_ephemeral_scratch is True
+
+
+class TestMultinodeConfig:
+    def test_defaults_all_none_and_empty_dict(self):
+        mn = MultinodeConfig()
+        assert mn.throughput_const is None
+        assert mn.to_dict() == {}  # None fields omitted
+
+    def test_to_dict_omits_none(self):
+        mn = MultinodeConfig(waves=6, throughput_const=1.23e12)
+        assert mn.to_dict() == {"waves": 6, "throughput_const": 1.23e12}
+
+    def test_from_dict_ignores_unknown_keys(self):
+        mn = MultinodeConfig.from_dict(
+            {"waves": 3, "search_cpus": 20, "future_knob": "ignored"}
+        )
+        assert mn.waves == 3
+        assert mn.search_cpus == 20
+
+    def test_pipeline_config_roundtrip_with_multinode(self, tmp_path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            multinode=MultinodeConfig(
+                array_throttle=12, throughput_const=5e11, search_mem="24000M"
+            ),
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.multinode is not None
+        assert loaded.multinode.array_throttle == 12
+        assert loaded.multinode.throughput_const == 5e11
+        assert loaded.multinode.search_mem == "24000M"
+
+    def test_pipeline_config_roundtrip_without_multinode(self, tmp_path):
+        cfg = PipelineConfig(
+            project_dir="/p", slurm=SlurmConfig(partition="hawkcpu")
+        )
+        path = tmp_path / "config.yaml"
+        cfg.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.multinode is None

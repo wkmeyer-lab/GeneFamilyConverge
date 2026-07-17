@@ -178,6 +178,114 @@ def detect_node_cpus(partition: str) -> dict[str, int]:
     }
 
 
+def detect_max_array_size() -> int | None:
+    """Return the cluster's SLURM ``MaxArraySize`` (from ``scontrol show config``).
+
+    ``MaxArraySize`` is one greater than the largest allowed zero-origin array
+    index, so a job array may hold up to ``MaxArraySize`` tasks. Returns
+    ``None`` when scontrol is unavailable, the value cannot be parsed, or it is
+    not positive. Never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "config"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"^MaxArraySize\s*=\s*(\d+)", result.stdout, re.MULTILINE)
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value > 0 else None
+
+
+def _detect_partition_qos(partition: str) -> str | None:
+    """Return the QOS bound to *partition* via ``scontrol show partition``.
+
+    Returns ``None`` when scontrol is unavailable or the partition declares no
+    usable QOS (``QOS=N/A`` / ``(null)``). Never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "partition", partition],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"\bQOS=(\S+)", result.stdout)
+    if match is None:
+        return None
+    qos = match.group(1)
+    if qos in ("N/A", "(null)"):
+        return None
+    return qos
+
+
+def _parse_qos_max_jobs(line: str) -> int | None:
+    """Most restrictive positive limit in a ``GrpJobs|MaxJobsPU`` sacctmgr row.
+
+    Empty fields mean "unlimited" and ``-1`` means "cleared"; both are skipped.
+    Returns ``None`` if no field carries a positive limit.
+    """
+    limits: list[int] = []
+    for field in line.strip().split("|"):
+        try:
+            value = int(field.strip())
+        except ValueError:
+            continue
+        if value > 0:
+            limits.append(value)
+    return min(limits) if limits else None
+
+
+def detect_qos_max_jobs(partition: str) -> int | None:
+    """Best-effort cap on concurrently running jobs for *partition*'s QOS.
+
+    Reads the partition's QOS (``scontrol show partition``), then the most
+    restrictive of that QOS's ``GrpJobs`` (total running jobs for the QOS) and
+    ``MaxJobsPU`` (running jobs per user) via ``sacctmgr``. Returns ``None``
+    when it cannot be determined -- no partition QOS, sacctmgr absent, the
+    limits are unlimited, or any error -- since SLURM enforces QOS at runtime
+    regardless; ``None`` simply means "do not pre-cap the %W throttle". Never
+    raises.
+    """
+    qos = _detect_partition_qos(partition)
+    if qos is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "sacctmgr",
+                "-n",
+                "-P",
+                "show",
+                "qos",
+                qos,
+                "format=GrpJobs,MaxJobsPU",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.strip():
+            return _parse_qos_max_jobs(line)
+    return None
+
+
 def _parse_slurm_memory_mb(value: str) -> int | None:
     raw = value.strip().rstrip("+")
     if raw.isdigit():

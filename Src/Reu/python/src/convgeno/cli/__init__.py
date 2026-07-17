@@ -6,6 +6,26 @@ import argparse
 import sys
 
 
+def _resolve_orthofinder_mode(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> str:
+    """Resolve the effective OrthoFinder execution mode.
+
+    Default is ``multinode``. Accepts ``--mode {multinode,single-node}`` plus
+    the back-compat aliases ``--multinode`` / ``--single-node``, and errors on
+    a conflicting combination.
+    """
+    wants_single = args.single_node or args.mode == "single-node"
+    wants_multi = args.multinode or args.mode == "multinode"
+    if wants_single and wants_multi:
+        parser.error(
+            "Conflicting execution mode: choose only one of "
+            "--mode / --multinode / --single-node."
+        )
+    return "single-node" if wants_single else "multinode"
+
+
 def main() -> None:
     """Entry point for the convgeno command-line interface."""
     parser = argparse.ArgumentParser(
@@ -55,19 +75,30 @@ def main() -> None:
         ),
     )
     of_gen.add_argument(
+        "--mode",
+        choices=["multinode", "single-node"],
+        default=None,
+        help=(
+            "Execution mode (default: multinode — prepare + search array + "
+            "resume). 'single-node' generates the single benchmark/fallback "
+            "script."
+        ),
+    )
+    of_gen.add_argument(
         "--multinode",
         action="store_true",
-        help=(
-            "Generate three scripts for multi-node execution "
-            "(prepare, search array, resume) instead of one."
-        ),
+        help="Alias for --mode multinode (this is the default).",
+    )
+    of_gen.add_argument(
+        "--single-node",
+        action="store_true",
+        help="Alias for --mode single-node (benchmark/fallback).",
     )
     of_gen.add_argument(
         "--script-dir",
         default="slurm_scripts",
         help=(
-            "Directory to write generated scripts (used with --multinode, "
-            "default: slurm_scripts)"
+            "Directory to write multi-node scripts (default: slurm_scripts)"
         ),
     )
 
@@ -94,19 +125,30 @@ def main() -> None:
         help="Skip confirmation prompt and submit immediately.",
     )
     of_run.add_argument(
+        "--mode",
+        choices=["multinode", "single-node"],
+        default=None,
+        help=(
+            "Execution mode (default: multinode — submit prepare + search "
+            "array + resume). 'single-node' submits the single "
+            "benchmark/fallback job."
+        ),
+    )
+    of_run.add_argument(
         "--multinode",
         action="store_true",
-        help=(
-            "Generate and submit three scripts for multi-node execution "
-            "(prepare, search array, resume) instead of one."
-        ),
+        help="Alias for --mode multinode (this is the default).",
+    )
+    of_run.add_argument(
+        "--single-node",
+        action="store_true",
+        help="Alias for --mode single-node (benchmark/fallback).",
     )
     of_run.add_argument(
         "--script-dir",
         default="slurm_scripts",
         help=(
-            "Directory to write generated scripts (used with --multinode, "
-            "default: slurm_scripts)"
+            "Directory to write multi-node scripts (default: slurm_scripts)"
         ),
     )
 
@@ -123,31 +165,33 @@ def main() -> None:
 
     elif args.command == "orthofinder":
         if args.orthofinder_command == "generate":
-            if args.multinode:
+            mode = _resolve_orthofinder_mode(parser, args)
+            if mode == "single-node":
+                from convgeno.cli.orthofinder_cmd import run_generate
+
+                run_generate(config_path=args.config, script_path=args.script)
+            else:
                 from convgeno.cli.orthofinder_cmd import run_generate_multinode
 
                 run_generate_multinode(
                     config_path=args.config, script_dir=args.script_dir
                 )
-            else:
-                from convgeno.cli.orthofinder_cmd import run_generate
-
-                run_generate(config_path=args.config, script_path=args.script)
         elif args.orthofinder_command == "run":
-            if args.multinode:
-                from convgeno.cli.orthofinder_cmd import run_submit_multinode
-
-                run_submit_multinode(
-                    config_path=args.config,
-                    script_dir=args.script_dir,
-                    skip_confirm=args.yes,
-                )
-            else:
+            mode = _resolve_orthofinder_mode(parser, args)
+            if mode == "single-node":
                 from convgeno.cli.orthofinder_cmd import run_submit
 
                 run_submit(
                     config_path=args.config,
                     script_path=args.script,
+                    skip_confirm=args.yes,
+                )
+            else:
+                from convgeno.cli.orthofinder_cmd import run_submit_multinode
+
+                run_submit_multinode(
+                    config_path=args.config,
+                    script_dir=args.script_dir,
                     skip_confirm=args.yes,
                 )
         else:
