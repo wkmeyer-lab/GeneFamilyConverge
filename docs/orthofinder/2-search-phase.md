@@ -79,7 +79,7 @@ biggest node 52, smallest 15 → `min(17, 14) = 14`.
 ### W — concurrency (the array throttle)
 
 ```
-W = min( configured default (8) , QOS MaxJobs ),   clamped to ≥ 1
+W = min( configured default (12) , QOS MaxJobs ),   clamped to ≥ 1
 ```
 
 `W` is the maximum number of array tasks allowed to run at once; it becomes the

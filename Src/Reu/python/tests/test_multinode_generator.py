@@ -1446,13 +1446,13 @@ class TestDeriveSearchCpus:
 
 
 class TestDeriveSearchConcurrency:
-    """W = the array %W throttle: default 8, override wins, QOS MaxJobs caps."""
+    """W = the array %W throttle: default 12, override wins, QOS MaxJobs caps."""
 
-    def test_default_is_eight(self):
-        assert derive_search_concurrency() == 8
+    def test_default_is_twelve(self):
+        assert derive_search_concurrency() == 12
 
     def test_override_wins(self):
-        assert derive_search_concurrency(override=12) == 12
+        assert derive_search_concurrency(override=20) == 20
 
     def test_override_below_one_raises(self):
         with pytest.raises(ValueError, match="array_throttle override"):
@@ -1462,7 +1462,7 @@ class TestDeriveSearchConcurrency:
         assert derive_search_concurrency(qos_max_jobs=3) == 3
 
     def test_qos_above_default_has_no_effect(self):
-        assert derive_search_concurrency(qos_max_jobs=100) == 8
+        assert derive_search_concurrency(qos_max_jobs=100) == 12
 
     def test_qos_caps_the_override(self):
         assert derive_search_concurrency(override=20, qos_max_jobs=5) == 5
@@ -1471,10 +1471,10 @@ class TestDeriveSearchConcurrency:
         assert derive_search_concurrency(override=20, qos_max_jobs=1) == 1
 
     def test_qos_zero_means_unlimited(self):
-        assert derive_search_concurrency(qos_max_jobs=0) == 8
+        assert derive_search_concurrency(qos_max_jobs=0) == 12
 
     def test_qos_negative_ignored(self):
-        assert derive_search_concurrency(qos_max_jobs=-5) == 8
+        assert derive_search_concurrency(qos_max_jobs=-5) == 12
 
 
 class TestResolveSearchConcurrency:
@@ -1492,7 +1492,7 @@ class TestResolveSearchConcurrency:
             "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
             lambda partition: None,
         )
-        assert resolve_search_concurrency("hawkcpu") == 8
+        assert resolve_search_concurrency("hawkcpu") == 12
 
     def test_override_still_capped_by_qos(self, monkeypatch):
         monkeypatch.setattr(
@@ -1782,9 +1782,9 @@ class TestComputeSearchArraySizing:
             fallback_mem="16000M",
         )
         assert sizing.cpus == 14  # min(52//3, 15-1)
-        assert sizing.concurrency == 8
+        assert sizing.concurrency == 12
         assert sizing.waves == 4
-        assert sizing.tasks == 32  # K*W, well under n^2=12996 and MaxArraySize
+        assert sizing.tasks == 48  # K*W, well under n^2=12996 and MaxArraySize
         assert sizing.within_task_parallel == 14  # C/p, p=1
         assert sizing.mem.endswith("M")
 
@@ -1812,8 +1812,8 @@ class TestComputeSearchArraySizing:
             fallback_mem="16000M",
         )
         assert sizing.cpus == 1
-        assert sizing.concurrency == 8
-        assert sizing.tasks == 32  # K*W (no n^2 cap available)
+        assert sizing.concurrency == 12
+        assert sizing.tasks == 48  # K*W (no n^2 cap available)
         assert sizing.time_limit == "72:00:00"  # fallback
         assert sizing.mem == "16000M"  # fallback
 

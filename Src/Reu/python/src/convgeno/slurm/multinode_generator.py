@@ -986,7 +986,7 @@ def derive_search_cpus_from_discovery(
     )
 
 
-_SEARCH_CONCURRENCY_DEFAULT = 8  # W: polite default max concurrent array tasks
+_SEARCH_CONCURRENCY_DEFAULT = 12  # W: polite default max concurrent array tasks
 
 
 def derive_search_concurrency(
@@ -996,7 +996,7 @@ def derive_search_concurrency(
     """Max concurrent search-array tasks (W) -- the array ``%W`` throttle.
 
     W is the SPEED lever: total search time ~= total_cost / (W * C). It is a
-    polite *intent* cap, never tuned from a prior run -- the config default (8)
+    polite *intent* cap, never tuned from a prior run -- the config default (12)
     or a positive ``override`` (from ``MultinodeConfig.array_throttle``). When a
     QOS ``MaxJobs`` limit is supplied it caps W (values < 1 mean "no limit" and
     are ignored); SLURM enforces QOS at runtime regardless. The further cap
