@@ -130,24 +130,34 @@ node, before the long search), so an infeasible run is caught early. For this
 project's regime (~114 species), `required_r ≈ 15,300` — comfortably under
 typical HPC hard caps.
 
-### 5. Scratch staging (the MSA stage runs on fast scratch)
+### 5. Where the MSA stage does its I/O (scratch model)
 
 The clean single-node run did **all** its per-orthogroup MSA/tree I/O on the fast
 `/share/ceph/scratch` NVMe pool (its whole `WorkingDirectory` lived there);
 running `-b` in place on the busier shared group pool instead produced transient
 0-byte MAFFT alignments (the `list index out of range` warnings). Memory was ruled
 out (`sacct`: both runs used <100 GB of a 342 GB request), leaving the filesystem
-as the difference. So, mirroring the single-node and search-array scratch
-mechanism, resume — when `slurm.scratch_dir` is set — **stages the whole
-`WorkingDirectory`** (the `n²` `Blast{i}_{j}.txt.gz` + `Species*.fa` + IDs that the
-search array consolidated onto shared) to scratch, points `-b`, `-p` and `TMPDIR`
-there so every per-orthogroup read/write is node-fast, and on success **rsyncs the
-produced `OrthoFinder/` results back to the shared `WorkingDirectory`** — so the
-deliverable lands at the same shared path and downstream consumers are unchanged.
-A SIGTERM/SIGINT/ERR salvage trap copies partial results back before the node is
-lost. With no scratch configured — or none writable at runtime — it falls back to
-running `-b` in place on shared. The completeness + fd gates always run on the
-**shared** copy first (authoritative), never on the staged copy.
+as the difference. So the resume phase keeps the failure-prone MSA I/O on fast
+scratch, choosing one of three models from the config:
+
+- **Persistent (cluster-wide) scratch — the whole chain runs on scratch
+  (Mode A, default here).** `scratch_dir` set and *not* `is_ephemeral_scratch`:
+  prepare already created the `WorkingDirectory` on scratch, so resume
+  runs `-b` **in place** with no stage-in and copies only the final `Results_*`
+  dir to the shared `output_dir`. The scratch `WorkingDirectory` persists, so a
+  re-submit continues with **no re-search and no staging**.
+- **Ephemeral (node-local) scratch (Mode B).** Node-local disk is wiped at job
+  end and can't span the chain, so the `WorkingDirectory` lives on shared; resume
+  **stages it to node-local scratch** for the MSA stage (excluding any prior
+  `OrthoFinder/` results), then copies the produced `OrthoFinder/` tree back to
+  shared before the node is released.
+- **No scratch (Mode C).** `-b` runs in place on the shared `WorkingDirectory`.
+
+In every mode a SIGTERM/SIGINT/ERR trap best-effort salvages partial results to
+`output_dir`, and the `-p`/`TMPDIR` pickle dir is (re)created immediately before
+`-b` (a long stage-in can otherwise let the pool reap an idle empty dir, and
+OrthoFinder aborts if `-p` is missing). The completeness + fd gates always run on
+the pointer's `WorkingDirectory` first.
 
 ### 6. Run `orthofinder -b`
 
@@ -160,14 +170,22 @@ Run under `set +e` / `set -e` so the exit code is captured (not aborted) and the
 cleanup below always runs. `-S` is **not** passed — the search program is already
 fixed in the WorkingDirectory by prepare.
 
-### 7. Cleanup
+### 7. Results copy-out + cleanup
 
-On success the produced `OrthoFinder/` results are copied scratch → shared, then
-the scratch stage directory is removed (node-local/ephemeral scratch) **or left**
-when it is persistent shared scratch (the cluster's purge policy reclaims it —
-never `rm`'d, matching the single-node convention); with no scratch, the project
-temp dir is removed. On failure the partial results are salvaged to shared and the
-scratch/temp is preserved for debugging. The job exits with OrthoFinder's exit code.
+On success:
+
+- **Mode A (persistent):** the final `Results_*` dir is copied to the shared
+  `output_dir`; the scratch `WorkingDirectory` is **left in place** (the cluster
+  purge policy reclaims it — never `rm`'d, and it stays available for a re-submit
+  within the purge window).
+- **Mode B (ephemeral):** the produced `OrthoFinder/` tree is copied back to the
+  shared `WorkingDirectory`, then the node-local scratch stage dir is removed.
+- **Mode C (no scratch):** the project temp dir is removed; results are already
+  in place under the shared `WorkingDirectory`.
+
+On failure the partial results are best-effort salvaged to shared (Mode A/C leave
+the scratch/temp for debugging; Mode B salvages before the node is wiped). The job
+exits with OrthoFinder's exit code.
 
 ---
 

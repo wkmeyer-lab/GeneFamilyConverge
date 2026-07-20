@@ -24,6 +24,7 @@ from convgeno.slurm.multinode_generator import (
     SearchCommand,
     _parse_species_pair,
     _proteome_volume,
+    _whole_chain_on_scratch,
     build_all_pairs_search_commands,
     build_search_commands,
     compute_required_open_files,
@@ -1033,9 +1034,11 @@ class TestResumeScratch:
         assert 'rm -rf "$JOB_SCRATCH"' in script
         assert "Cleaning up node-local scratch" in script
 
-    def test_persistent_scratch_is_not_removed(self, sample_runtime):
-        # Persistent shared scratch temp must NOT be removed (purge policy
-        # reclaims it) -- mirrors the single-node persistent cleanup.
+    def test_persistent_scratch_runs_in_place_mode_a(self, sample_runtime):
+        # Persistent (cluster-wide) scratch -> whole-chain-on-scratch (Mode A):
+        # resume runs -b IN PLACE on the scratch WorkingDirectory (no stage-in, no
+        # resolve_scratch_base in resume, WORK_DIR not reassigned to a staging
+        # path) and copies the final Results_* to the shared output_dir.
         cfg = PipelineConfig(
             project_dir="/p",
             slurm=SlurmConfig(
@@ -1054,18 +1057,96 @@ class TestResumeScratch:
             runtime=sample_runtime,
         )
         script = generate_resume_script(cfg)
-        assert "resolve_scratch_base" in script  # staging uses scratch
-        assert 'rm -rf "$JOB_SCRATCH"' not in script  # persistent -> never removed
-        assert "purge policy reclaims it" in script
-        # salvage_resume only COPIES results back (never rm's), so it is present
-        # for persistent scratch too.
-        assert "salvage_resume" in script
+        assert "Whole-chain-on-scratch: running -b in place" in script
+        assert "resolve_scratch_base" not in script  # no stage-in in resume
+        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' not in script
+        assert 'SCRATCH_WORK_DIR="$WORK_DIR"' in script
+        assert 'rsync -a "$R" "$OUTPUT_DIR"/' in script  # Results -> shared
 
     def test_no_scratch_config_has_no_machinery(self, sample_config):
         # sample_config has scratch_dir=None.
         script = generate_resume_script(sample_config)
         assert "resolve_scratch_base" not in script
         assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+
+
+class TestWholeChainOnScratch:
+    """Mode A: persistent scratch -> whole chain on scratch; results to shared."""
+
+    @pytest.fixture()
+    def cfg(self, sample_runtime) -> PipelineConfig:
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                cpus_per_task=48,
+                mem="350400M",
+                scratch_dir="/share/ceph/scratch/prm526",
+                is_ephemeral_scratch=False,
+            ),
+            orthofinder=OrthoFinderConfig(
+                input_dir="/in",
+                output_dir="/out/run",
+                search_threads=48,
+                analysis_threads=12,
+            ),
+            runtime=sample_runtime,
+        )
+
+    def test_predicate_true_for_persistent(self, cfg):
+        assert _whole_chain_on_scratch(cfg) is True
+
+    def test_predicate_false_for_ephemeral(self, sample_runtime):
+        c = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(
+                partition="hawkcpu",
+                scratch_dir="/local/scratch",
+                is_ephemeral_scratch=True,
+            ),
+            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/o"),
+            runtime=sample_runtime,
+        )
+        assert _whole_chain_on_scratch(c) is False
+
+    def test_predicate_false_for_no_scratch(self, sample_config):
+        assert _whole_chain_on_scratch(sample_config) is False
+
+    def test_prepare_o_targets_scratch_work_root(self, cfg):
+        script = generate_prepare_script(cfg)
+        assert "resolve_scratch_base" in script  # scratch resolved in prepare
+        assert 'OF_WORK_ROOT="$SCRATCH_BASE/${RUN_NAME}"' in script
+        assert 'orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op' in script
+        assert 'find "$OF_WORK_ROOT"' in script
+
+    def test_prepare_pointer_and_manifests_stay_on_shared(self, cfg):
+        script = generate_prepare_script(cfg)
+        # pointer + manifests derive from the shared $OUTPUT_PARENT, not scratch
+        assert (
+            'WORK_DIR_FILE="$OUTPUT_PARENT/${RUN_NAME}_working_dir_path.txt"'
+            in script
+        )
+        assert 'MANIFEST_DIR="$OUTPUT_PARENT/${RUN_NAME}' in script
+
+    def test_prepare_non_scratch_uses_output_dir(self, sample_config):
+        # sample_config has scratch_dir=None -> OF_WORK_ROOT == OUTPUT_DIR.
+        script = generate_prepare_script(sample_config)
+        assert 'OF_WORK_ROOT="$OUTPUT_DIR"' in script
+        assert 'orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op' in script
+        assert "resolve_scratch_base" not in script
+
+    def test_resume_runs_in_place_and_copies_results(self, cfg):
+        script = generate_resume_script(cfg)
+        assert "Whole-chain-on-scratch: running -b in place" in script
+        assert 'orthofinder -b "$WORK_DIR"' in script
+        assert 'rsync -a "$R" "$OUTPUT_DIR"/' in script  # Results -> shared
+        assert "resolve_scratch_base" not in script  # no stage-in in resume
+        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' not in script
+
+    def test_resume_salvages_on_interrupt(self, cfg):
+        script = generate_resume_script(cfg)
+        assert "salvage_resume" in script
+        assert "trap salvage_resume SIGTERM SIGINT ERR" in script
 
 
 class TestLptPartition:

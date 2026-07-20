@@ -99,8 +99,15 @@ creates only `OUTPUT_PARENT` and aborts if `OUTPUT_DIR` already exists.
 ### 4. Run OrthoFinder prepare (`-op`)
 
 ```
-orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op -S "$SEARCH_PROGRAM"
+orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op -S "$SEARCH_PROGRAM"
 ```
+
+`$OF_WORK_ROOT` is the **whole-chain-on-scratch work-root** (`<scratch_dir>/<run>`)
+when persistent, cluster-wide scratch is configured — so the `WorkingDirectory`,
+DIAMOND DBs, and (later) the `n²` Blast set all live on fast scratch for the whole
+chain, and only the final results are copied to the shared `output_dir` by resume.
+Otherwise `$OF_WORK_ROOT` is `$OUTPUT_DIR` (the previous behaviour). Either way the
+pointer, command files, and manifests are written to the shared `$OUTPUT_PARENT`.
 
 stdout is captured to `<RUN_NAME>_prepare_full_stdout.log`. This single run **is**
 the probe — it creates `WorkingDirectory/` (with `SpeciesIDs.txt`,
@@ -119,9 +126,10 @@ any line that is not a valid command.
 
 ### 6. Locate and record the WorkingDirectory
 
-The script finds `WorkingDirectory` under `OUTPUT_DIR` and writes its absolute
-path to `<RUN_NAME>_working_dir_path.txt`. The resume job reads this pointer
-directly (a missing pointer means prepare failed).
+The script finds `WorkingDirectory` under `$OF_WORK_ROOT` (scratch in
+whole-chain-on-scratch mode, else `OUTPUT_DIR`) and writes its absolute path to
+`<RUN_NAME>_working_dir_path.txt` on shared. The search and resume jobs read this
+pointer directly (a missing pointer means prepare failed).
 
 ### 7. Determine how databases were handled
 
