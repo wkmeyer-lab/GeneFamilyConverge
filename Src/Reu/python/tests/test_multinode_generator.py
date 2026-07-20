@@ -961,7 +961,7 @@ class TestResumeScriptTmpdirAndThreads:
 
 
 class TestResumeScratch:
-    """Resume routes only -p/TMPDIR to scratch; bulk stays on shared."""
+    """Resume stages the WorkingDirectory to scratch, runs -b there, copies back."""
 
     @pytest.fixture()
     def scratch_config(self, sample_runtime) -> PipelineConfig:
@@ -991,29 +991,38 @@ class TestResumeScratch:
 
     def test_routes_pickle_and_tmpdir_to_scratch(self, scratch_config):
         script = generate_resume_script(scratch_config)
-        assert 'OF_TMP="$SCRATCH_BASE/${SLURM_JOB_ID}_of_tmp"' in script
+        assert 'OF_TMP="$JOB_SCRATCH/tmp"' in script
         assert 'export TMPDIR="$OF_TMP"' in script
         assert '-p "$OF_TMP"' in script  # OrthoFinder pickle dir
 
-    def test_bulk_stays_on_shared(self, scratch_config):
-        # -b runs against the shared WorkingDirectory in place; the n^2 Blast
-        # set is never rsynced/copied to scratch.
+    def test_stages_workdir_to_scratch_and_copies_back(self, scratch_config):
+        # The whole WorkingDirectory (n^2 Blast set + sequences) is staged to
+        # scratch, -b runs against the staged copy, and the produced results are
+        # rsynced back to the shared WorkingDirectory (same deliverable path).
         script = generate_resume_script(scratch_config)
-        assert 'orthofinder -b "$WORK_DIR"' in script
-        assert "$WORK_DIR" in script
-        assert "rsync" not in script  # no bulk staging in resume
+        assert 'SHARED_WORK_DIR="$WORK_DIR"' in script
+        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' in script
+        # stage-in copies the shared WorkingDirectory to scratch, excluding any
+        # prior OrthoFinder/ results so -b builds a fresh tree.
+        assert "--exclude='OrthoFinder'" in script
+        assert '"$SHARED_WORK_DIR"/ "$WORK_DIR"/' in script
+        assert 'orthofinder -b "$WORK_DIR"' in script  # -b uses the staged copy
+        assert (
+            'rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/'
+            in script
+        )  # copy-back
 
-    def test_salvage_trap_removes_local_temp(self, scratch_config):
-        # scratch_config is ephemeral -> salvage trap removes node-local temp.
+    def test_salvage_trap_copies_results_back(self, scratch_config):
+        # On interruption/error the trap salvages produced results scratch->shared.
         script = generate_resume_script(scratch_config)
-        assert "salvage_tmp" in script
-        assert "trap salvage_tmp SIGTERM SIGINT" in script
+        assert "salvage_resume" in script
+        assert "trap salvage_resume SIGTERM SIGINT ERR" in script
 
     def test_ephemeral_scratch_is_removed(self, scratch_config):
-        # Ephemeral (node-local) scratch temp IS removed on cleanup.
+        # Ephemeral (node-local) scratch stage dir IS removed on success.
         script = generate_resume_script(scratch_config)
-        assert 'rm -rf "$OF_TMP"' in script
-        assert "Removing node-local temp" in script
+        assert 'rm -rf "$JOB_SCRATCH"' in script
+        assert "Cleaning up node-local scratch" in script
 
     def test_persistent_scratch_is_not_removed(self, sample_runtime):
         # Persistent shared scratch temp must NOT be removed (purge policy
@@ -1036,10 +1045,12 @@ class TestResumeScratch:
             runtime=sample_runtime,
         )
         script = generate_resume_script(cfg)
-        assert "resolve_scratch_base" in script  # scratch still used for -p/TMPDIR
-        assert 'rm -rf "$OF_TMP"' not in script  # persistent -> never removed
+        assert "resolve_scratch_base" in script  # staging uses scratch
+        assert 'rm -rf "$JOB_SCRATCH"' not in script  # persistent -> never removed
         assert "purge policy reclaims it" in script
-        assert "salvage_tmp" not in script  # no interrupt-rm for persistent
+        # salvage_resume only COPIES results back (never rm's), so it is present
+        # for persistent scratch too.
+        assert "salvage_resume" in script
 
     def test_no_scratch_config_has_no_machinery(self, sample_config):
         # sample_config has scratch_dir=None.

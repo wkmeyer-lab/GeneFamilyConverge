@@ -1587,9 +1587,18 @@ def generate_resume_script(
 
     The generated script:
 
-    * Sets ``TMPDIR`` to a project-local temp directory to avoid filling
-      ``/dev/shm`` or ``/tmp``.
-    * Cleans up ``$TMPDIR`` on success, preserves it on failure.
+    * Runs the completeness + fd gates on the SHARED WorkingDirectory (where
+      the search array consolidated the ``n^2`` Blast results).
+    * When ``slurm.scratch_dir`` is set, STAGES that whole WorkingDirectory to
+      fast scratch and runs ``-b`` there, so every per-orthogroup MSA/tree
+      read/write is node-fast -- mirroring the single-node run, which did all
+      its I/O on scratch and never hit the transient empty-alignment failures
+      the shared group pool caused. The produced ``OrthoFinder/`` results are
+      rsynced back to the shared WorkingDirectory on success (a SIGTERM/SIGINT/
+      ERR trap salvages partial results), so the deliverable lands at the same
+      shared path and downstream consumers are unchanged. With no scratch
+      configured (or none writable at runtime) it falls back to running ``-b``
+      in place on shared.
     * Uses ``orthofinder.analysis_threads`` for ``-a`` (falling back to 1
       when unset).
 
@@ -1640,62 +1649,65 @@ def generate_resume_script(
         method_args = ""
     method_display = method_args.strip() or "(OrthoFinder default: dendroblast)"
 
-    # Temp/pickle placement. The bulk (WorkingDirectory + Results) is read and
-    # written IN PLACE on the shared filesystem; only OrthoFinder's small-file
-    # temp/pickle churn (-p + TMPDIR) is optionally routed to scratch. The n^2
-    # Blast set is never copied to node-local. Reuses the single-node scratch
-    # machinery INCLUDING its cleanup rule: node-local (ephemeral) scratch is
-    # removed; persistent shared scratch is LEFT for the cluster's purge policy.
+    # Scratch staging. The clean single-node run did ALL its MSA/tree I/O on
+    # fast scratch (its whole WorkingDirectory lived there); running -b in place
+    # on the shared group pool caused transient empty-alignment writes here
+    # (sacct ruled out memory: both runs used <100 GB of a 342 GB request). So,
+    # mirroring the single-node + search-array scratch mechanism, stage the whole
+    # WorkingDirectory -- the n^2 Blast{i}_{j}.txt.gz + Species*.fa + IDs that the
+    # search array consolidated onto shared -- to scratch, run -b there so every
+    # per-orthogroup read/write is node-fast, then rsync the produced OrthoFinder/
+    # results back to the shared WorkingDirectory so the deliverable lands at the
+    # SAME shared path as before (downstream consumers unchanged). The
+    # completeness + fd gates above run on the SHARED copy (authoritative); only
+    # the -b invocation uses the staged copy (WORK_DIR is reassigned to it).
     scratch_dir = config.slurm.scratch_dir
     if scratch_dir is None:
-        # No scratch: OrthoFinder temp on a project-local dir (shared); this is
-        # the project's own space (no purge policy), so remove it on success.
-        tmp_trap_block = ""
-        tmp_cleanup_success = (
-            'echo "Removing temp: $OF_TMP"\n    rm -rf "$OF_TMP" || true'
-        )
-        tmp_cleanup_failure = 'echo "Preserving temp for debugging: $OF_TMP"'
-        resume_tmp_block = """\
-# ---- Temp/pickle location (shared; no scratch_dir configured) ----
+        # No scratch configured: run -b in place on the shared WorkingDirectory,
+        # temp on a project-local dir (removed on success). Pre-staging path.
+        stage_block = """\
+# ---- No scratch configured: run -b in place on the shared WorkingDirectory ----
+SHARED_WORK_DIR="$WORK_DIR"
+USE_SCRATCH=0
 OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"
 export TMPDIR="$OF_TMP"
-mkdir -p "$TMPDIR"
-echo "OrthoFinder temp/pickle: $OF_TMP\""""
+mkdir -p "$OF_TMP"
+echo "No scratch configured; running -b in place on shared. Temp: $OF_TMP\""""
+        finish_success_block = (
+            'echo "Removing temp: $OF_TMP"\nrm -rf "$OF_TMP" || true'
+        )
+        finish_failure_block = 'echo "Preserving temp for debugging: $OF_TMP"'
     else:
         if config.slurm.is_ephemeral_scratch:
-            # Node-local (ephemeral) scratch -> safe to remove (the node
-            # reclaims it anyway); salvage trap removes it on interruption too.
-            tmp_trap_block = """\
-    salvage_tmp() {
-        trap - SIGTERM SIGINT
-        echo "Interrupted -- removing node-local temp (Results remain on shared)..."
-        rm -rf "$OF_TMP" 2>/dev/null || true
-    }
-    trap salvage_tmp SIGTERM SIGINT
-"""
-            tmp_cleanup_success = (
-                'echo "Removing node-local temp: $OF_TMP"\n'
-                '    rm -rf "$OF_TMP" || true'
-            )
-            tmp_cleanup_failure = (
-                'echo "Node-local temp ($OF_TMP) is reclaimed when the node is'
-                ' released."'
+            finish_success_block = (
+                'if [ "$USE_SCRATCH" = "1" ]; then\n'
+                '    echo "Cleaning up node-local scratch: $JOB_SCRATCH"\n'
+                '    rm -rf "$JOB_SCRATCH" || true\n'
+                'else\n'
+                '    echo "Removing temp: $OF_TMP"\n'
+                '    rm -rf "$OF_TMP" || true\n'
+                'fi'
             )
         else:
-            # Persistent shared scratch -> DO NOT remove; the cluster purge
-            # policy reclaims it (mirrors the single-node persistent cleanup).
-            # No salvage trap: never rm persistent scratch, even on interruption.
-            tmp_trap_block = ""
-            tmp_cleanup_success = (
-                'echo "Persistent scratch temp left in $OF_TMP (cluster purge'
-                ' policy reclaims it; not removed)."'
+            finish_success_block = (
+                'if [ "$USE_SCRATCH" = "1" ]; then\n'
+                '    echo "Persistent scratch left in $JOB_SCRATCH'
+                ' (cluster purge policy reclaims it)."\n'
+                'else\n'
+                '    echo "Removing temp: $OF_TMP"\n'
+                '    rm -rf "$OF_TMP" || true\n'
+                'fi'
             )
-            tmp_cleanup_failure = (
-                'echo "Persistent scratch temp left in $OF_TMP for debugging."'
-            )
-        resume_tmp_block = f"""\
-# ---- Temp/pickle location (bulk stays shared; churn to scratch) ----
-SHARED_TMP="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
+        finish_failure_block = (
+            'echo "Left for debugging: ${JOB_SCRATCH:-$OF_TMP}'
+            ' (any partial results were salvaged to shared)."'
+        )
+        stage_block = f"""\
+# ---- Stage WorkingDirectory to fast scratch (mirror single-node), else in place ----
+# The search array consolidated all n^2 Blast{{i}}_{{j}}.txt.gz onto the shared
+# WorkingDirectory; stage that whole dir to scratch so -b's per-orthogroup MSA
+# I/O is node-fast, then copy the produced OrthoFinder/ results back to shared.
+SHARED_WORK_DIR="$WORK_DIR"
 PREFERRED_SCRATCH="{scratch_dir}"
 FALLBACK_SCRATCH="/tmp/scratch"
 {_RESOLVE_SCRATCH_FUNC}
@@ -1704,14 +1716,34 @@ if [ -z "$SCRATCH_BASE" ]; then
     SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
 fi
 if [ -n "$SCRATCH_BASE" ]; then
-    OF_TMP="$SCRATCH_BASE/${{SLURM_JOB_ID}}_of_tmp"
-    echo "OrthoFinder temp/pickle -> scratch: $OF_TMP (base $SCRATCH_BASE)"
-{tmp_trap_block}else
-    OF_TMP="$SHARED_TMP"
-    echo "No writable scratch; OrthoFinder temp/pickle on shared: $OF_TMP"
-fi
-export TMPDIR="$OF_TMP"
-mkdir -p "$TMPDIR\""""
+    USE_SCRATCH=1
+    JOB_SCRATCH="$SCRATCH_BASE/${{SLURM_JOB_ID}}_of_resume"
+    WORK_DIR="$JOB_SCRATCH/WorkingDirectory"
+    OF_TMP="$JOB_SCRATCH/tmp"
+    mkdir -p "$WORK_DIR" "$OF_TMP"
+    export TMPDIR="$OF_TMP"
+    echo "Staging WorkingDirectory to scratch: $SHARED_WORK_DIR -> $WORK_DIR"
+    df -h "$JOB_SCRATCH" 2>/dev/null || true
+    # -b needs only the Blast set + Species*.fa + IDs; exclude any prior
+    # OrthoFinder/ results (a re-run's stale partial output) so the staged copy
+    # stays lean and -b builds a fresh results tree.
+    rsync -a --exclude='OrthoFinder' "$SHARED_WORK_DIR"/ "$WORK_DIR"/
+    # Salvage produced results back to shared on interruption / unexpected error.
+    salvage_resume() {{
+        trap - SIGTERM SIGINT ERR
+        echo "Interrupted/failed -- salvaging results scratch -> shared..."
+        if [ -d "$WORK_DIR/OrthoFinder" ]; then
+            rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/ || true
+        fi
+    }}
+    trap salvage_resume SIGTERM SIGINT ERR
+else
+    USE_SCRATCH=0
+    OF_TMP="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
+    export TMPDIR="$OF_TMP"
+    mkdir -p "$OF_TMP"
+    echo "No writable scratch; running -b in place on shared. Temp: $OF_TMP"
+fi"""
 
     script = f"""\
 #!/bin/bash
@@ -1801,7 +1833,7 @@ else
     exit 1
 fi
 
-{resume_tmp_block}
+{stage_block}
 
 TOTAL_THREADS={config.orthofinder.search_threads}
 ANALYSIS_THREADS={analysis_threads}
@@ -1835,18 +1867,22 @@ echo "============================================================"
 
 if [ "$OF_EXIT" -eq 0 ]; then
     echo "OrthoFinder completed successfully."
-    {tmp_cleanup_success}
-
-    if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
-        echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
-        echo "Check $OUTPUT_DIR for a Results_* directory."
+    if [ "$USE_SCRATCH" = "1" ]; then
+        echo "Copying OrthoFinder results: scratch -> shared WorkingDirectory"
+        mkdir -p "$SHARED_WORK_DIR/OrthoFinder"
+        rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/
+        trap - SIGTERM SIGINT ERR
     fi
-
+{finish_success_block}
     echo "OrthoFinder multi-node run completed successfully."
     echo "Results are in place on the shared output directory: $OUTPUT_DIR"
 else
     echo "OrthoFinder exited with code $OF_EXIT."
-    {tmp_cleanup_failure}
+    if [ "$USE_SCRATCH" = "1" ] && [ -d "$WORK_DIR/OrthoFinder" ]; then
+        echo "Salvaging partial results: scratch -> shared"
+        rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/ || true
+    fi
+{finish_failure_block}
 fi
 
 exit "$OF_EXIT"

@@ -4,7 +4,7 @@ This document describes **Job 3 of 3** in `convgeno`'s multi-node OrthoFinder
 workflow: how the run is finished on a single fat node once the distributed
 search is complete. It is a factual walkthrough of the workflow and the math, in
 the order things actually happen. For the jobs that come before, see
-[`prepare-phase.md`](./prepare-phase.md) and [`search-phase.md`](./search-phase.md).
+[`1-prepare-phase.md`](./1-prepare-phase.md) and [`2-search-phase.md`](./2-search-phase.md).
 
 ---
 
@@ -26,7 +26,7 @@ flowchart LR
 
 The `afterok` dependency means resume runs **only if the whole search array
 succeeded**. If any search task failed, resume never starts, and the chain halts
-at the broken link (see [`search-phase.md`](./search-phase.md) for how to
+at the broken link (see [`2-search-phase.md`](./2-search-phase.md) for how to
 diagnose and resubmit). Before doing any work, resume independently re-verifies
 that the search set is complete (below), so an incomplete or corrupt search set
 can never flow into the analysis.
@@ -51,8 +51,9 @@ Generated script: `slurm_scripts/orthofinder_resume.sh`
 
 **Output:** the final OrthoFinder results directory under
 `orthofinder.output_dir` (`Results_*/` with `Orthogroups/`, gene trees, the
-species tree, and orthologue/duplication tables), written **in place on the
-shared filesystem**.
+species tree, and orthologue/duplication tables), landing on the **shared
+filesystem** at the same path either way — written there directly when running in
+place, or produced on scratch and rsynced back on success when staged (§5).
 
 ---
 
@@ -75,9 +76,9 @@ flowchart TD
     P["Read WorkingDirectory pointer"] --> G["Completeness gate:<br/>all n^2 Blast files present?"]
     G -->|no| GX["print missing pairs + resubmit line;<br/>exit WITHOUT -b"]
     G -->|yes| F["fd gate: raise ulimit -n to required_r<br/>(or fail fast if hard cap too low)"]
-    F --> T["Place -p / TMPDIR<br/>(scratch if configured, else shared)"]
+    F --> T["Stage WorkingDirectory to scratch (rsync);<br/>point -b/-p/TMPDIR there (else run in place on shared)"]
     T --> B["orthofinder -b (with -M/-A/-T = single-node)"]
-    B --> CL["cleanup temp (ephemeral rm / persistent leave);<br/>Results already in place on shared"]
+    B --> CL["copy OrthoFinder/ results scratch → shared;<br/>cleanup scratch (ephemeral rm / persistent leave)"]
 ```
 
 ### 1. Resource request + environment
@@ -129,16 +130,24 @@ node, before the long search), so an infeasible run is caught early. For this
 project's regime (~114 species), `required_r ≈ 15,300` — comfortably under
 typical HPC hard caps.
 
-### 5. Temp / pickle placement
+### 5. Scratch staging (the MSA stage runs on fast scratch)
 
-The bulk data — the `WorkingDirectory` (with the `n²` Blast files, often
-tens–hundreds of GB) and the Results — is read and written **in place on the
-shared filesystem**; it is never staged to node-local disk. Only OrthoFinder's
-small-file temp/pickle churn is optionally routed to scratch: with
-`slurm.scratch_dir` set it resolves scratch (configured → `/tmp/scratch` → a
-shared temp subdir) and points both `-p` (pickle dir) and `TMPDIR` there. A
-SIGTERM/SIGINT salvage trap removes **node-local** temp on interruption; the
-Results, being on shared, persist regardless.
+The clean single-node run did **all** its per-orthogroup MSA/tree I/O on the fast
+`/share/ceph/scratch` NVMe pool (its whole `WorkingDirectory` lived there);
+running `-b` in place on the busier shared group pool instead produced transient
+0-byte MAFFT alignments (the `list index out of range` warnings). Memory was ruled
+out (`sacct`: both runs used <100 GB of a 342 GB request), leaving the filesystem
+as the difference. So, mirroring the single-node and search-array scratch
+mechanism, resume — when `slurm.scratch_dir` is set — **stages the whole
+`WorkingDirectory`** (the `n²` `Blast{i}_{j}.txt.gz` + `Species*.fa` + IDs that the
+search array consolidated onto shared) to scratch, points `-b`, `-p` and `TMPDIR`
+there so every per-orthogroup read/write is node-fast, and on success **rsyncs the
+produced `OrthoFinder/` results back to the shared `WorkingDirectory`** — so the
+deliverable lands at the same shared path and downstream consumers are unchanged.
+A SIGTERM/SIGINT/ERR salvage trap copies partial results back before the node is
+lost. With no scratch configured — or none writable at runtime — it falls back to
+running `-b` in place on shared. The completeness + fd gates always run on the
+**shared** copy first (authoritative), never on the staged copy.
 
 ### 6. Run `orthofinder -b`
 
@@ -153,11 +162,12 @@ fixed in the WorkingDirectory by prepare.
 
 ### 7. Cleanup
 
-The Results are already in place on shared. On success the temp is removed
-(node-local/ephemeral scratch, or the project temp) **or left** when it is on
-persistent shared scratch (the cluster's purge policy reclaims it — never `rm`'d,
-matching the single-node convention). On failure the temp is preserved for
-debugging. The job exits with OrthoFinder's exit code.
+On success the produced `OrthoFinder/` results are copied scratch → shared, then
+the scratch stage directory is removed (node-local/ephemeral scratch) **or left**
+when it is persistent shared scratch (the cluster's purge policy reclaims it —
+never `rm`'d, matching the single-node convention); with no scratch, the project
+temp dir is removed. On failure the partial results are salvaged to shared and the
+scratch/temp is preserved for debugging. The job exits with OrthoFinder's exit code.
 
 ---
 

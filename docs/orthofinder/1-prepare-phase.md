@@ -3,7 +3,7 @@
 This document describes **Job 1 of 3** in `convgeno`'s multi-node OrthoFinder
 workflow. It is a factual walkthrough of what the prepare job does, in the order
 it actually runs. For the load-balancing math and the search array, see
-[`search-phase.md`](./search-phase.md).
+[`2-search-phase.md`](./2-search-phase.md).
 
 ---
 
@@ -194,7 +194,7 @@ python -m convgeno.slurm.build_search_manifest \
 `SEARCH_TASKS` (`T`) is fixed when the scripts are generated, so the number of
 manifests written here always matches the search array's width. The load-
 balancing algorithm (the cost model, the `T` value, and how commands are
-assigned to buckets) is documented in [`search-phase.md`](./search-phase.md). If
+assigned to buckets) is documented in [`2-search-phase.md`](./2-search-phase.md). If
 this step fails, the prepare job aborts so the search array is never launched
 against a missing or partial work plan.
 
@@ -216,4 +216,4 @@ complete: no species pair is missing, and no database is absent.
 
 On success, the search array (Job 2) starts under an `afterok` dependency and
 consumes the manifests and databases produced here. See
-[`search-phase.md`](./search-phase.md).
+[`2-search-phase.md`](./2-search-phase.md).

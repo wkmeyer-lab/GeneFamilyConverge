@@ -4,7 +4,7 @@ This document describes **Job 2 of 3** in `convgeno`'s multi-node OrthoFinder
 workflow: how the O(n²) all-vs-all sequence search is distributed across a SLURM
 array, load-balanced, and made restartable. It is a factual walkthrough of the
 math and the runtime behaviour, in the order things actually happen. For the job
-that produces the inputs used here, see [`prepare-phase.md`](./prepare-phase.md).
+that produces the inputs used here, see [`1-prepare-phase.md`](./1-prepare-phase.md).
 
 ---
 
@@ -398,4 +398,4 @@ single-node OrthoFinder run would — just computed in parallel.
 
 Once the whole array completes, the resume job (Job 3) reads the
 `WorkingDirectory` pointer and runs `orthofinder -b` to finish clustering, tree
-inference, and orthologue assignment — see [`resume-phase.md`](./resume-phase.md).
+inference, and orthologue assignment — see [`3-resume-phase.md`](./3-resume-phase.md).
