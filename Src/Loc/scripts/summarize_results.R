@@ -1,12 +1,11 @@
 # summarize_results.R
 #
-# Parse CAFE-5 and BadiRate outputs into clean summary tables.
+# Parse CAFE-5 outputs into clean summary tables.
 # This is the Python → R handoff point.
 #
 # Reads:
 #   Data/processed/orthofinder/   (gene family definitions)
 #   Data/processed/cafe/          (family size, turnover, p-values)
-#   Data/processed/badirate/      (null vs alt model comparisons)
 #   Phenotype table from config
 #
 # Writes:

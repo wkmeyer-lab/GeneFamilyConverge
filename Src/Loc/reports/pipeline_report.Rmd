@@ -10,7 +10,6 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 # TODO: source Reu R helpers
 # source("Src/Reu/r/read_orthofinder_outputs.R")
 # source("Src/Reu/r/read_cafe_outputs.R")
-# source("Src/Reu/r/read_badirate_outputs.R")
 ```
 
 ## Run metadata
@@ -29,12 +28,6 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
 ```{r}
 # TODO: rapidly evolving families, turnover summary
-```
-
-## BadiRate results
-
-```{r}
-# TODO: families where phenotype model fits better than null
 ```
 
 ## Figures

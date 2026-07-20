@@ -220,6 +220,6 @@ single-node benchmark a valid comparison.
 ## What runs next
 
 Resume is the final job in the OrthoFinder orchestration; its Results directory
-is the deliverable. Downstream pipeline steps (CAFE-5 / BadiRate turnover
-modeling and the R association analysis) consume those results via files and are
-outside this multi-node orchestration.
+is the deliverable. Downstream pipeline steps (CAFE-5 turnover modeling and the
+R association analysis) consume those results via files and are outside this
+multi-node orchestration.

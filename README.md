@@ -16,22 +16,21 @@ scientifically equivalent to a single-node run.
 ```
 proteomes ──▶ filter isoforms ──▶ OrthoFinder ──▶ gene-family counts
  (1/species)   (longest per gene)  (orthogroups)        │
-                                                  ┌──────┴──────┐
-                                                  ▼             ▼
-                                               CAFE-5       BadiRate
-                                            (size/turnover) (model comparison)
-                                                  └──────┬──────┘
-                                                         ▼
+                                                        ▼
+                                                     CAFE-5
+                                                 (size/turnover)
+                                                        │
+                                                        ▼
                                             R analysis + figures
                                      (copy-number ↔ convergent phenotype)
 ```
 
 The scientific question is whether **shifts in gene-family copy number**
 coincide with **independently evolved (convergent) phenotypes**. OrthoFinder
-defines the gene families (orthogroups); phylogenetic turnover models (CAFE-5 /
-BadiRate) characterize expansions/contractions along a species tree; and a
-downstream R step links copy-number change to convergent traits (the planned
-method is a RERconverge-adapted branch association).
+defines the gene families (orthogroups); a phylogenetic turnover model (CAFE-5)
+characterizes expansions/contractions along a species tree; and a downstream R
+step links copy-number change to convergent traits (the planned method is a
+RERconverge-adapted branch association).
 
 ## Implementation status
 
@@ -43,7 +42,7 @@ This repository is **partially implemented** — the honest picture:
 | OrthoFinder — multi-node SLURM orchestration (prepare → search → resume) | ✅ **Implemented & tested** | `convgeno.slurm`, `convgeno orthofinder` |
 | OrthoFinder — single-node (benchmark/fallback) | ✅ **Implemented & tested** | `convgeno orthofinder … --single-node` |
 | Cluster auto-discovery + throughput calibration | ✅ **Implemented** | `convgeno.slurm.discovery`, `tools/throughput-constant/` |
-| CAFE-5 / BadiRate turnover modeling | ⏳ **Planned (stubs)** | `convgeno.external.cafe` / `.badirate` |
+| CAFE-5 turnover modeling | ⏳ **Planned (stubs)** | `convgeno.external.cafe` |
 | R association analysis + figures | ⏳ **Planned (stubs)** | `Src/Reu/r/`, `Src/Loc/scripts` |
 
 Everything below documents the **implemented** parts.
@@ -302,8 +301,8 @@ versions in `environment.yml`):
 ## Roadmap
 
 Implemented: isoform filtering and the multi-node/single-node OrthoFinder
-orchestration. Planned (currently stubs): CAFE-5 / BadiRate turnover modeling
-and the R association analysis (RERconverge-adapted branch association) linking
+orchestration. Planned (currently stubs): CAFE-5 turnover modeling and the R
+association analysis (RERconverge-adapted branch association) linking
 copy-number change to convergent phenotypes.
 
 ## Acknowledgements

@@ -49,10 +49,6 @@ cafe:
   n_gamma_cats: 5
   extra_args: ""
 
-badirate:
-  enabled: true
-  extra_args: ""
-
 runtime:
   # If true, overwrite existing intermediate outputs
   overwrite: false

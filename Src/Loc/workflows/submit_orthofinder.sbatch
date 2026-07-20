@@ -18,4 +18,3 @@ python Src/Loc/scripts/run_orthofinder.py --config "$CONFIG" --tools "$TOOLS"
 
 # Prepare inputs for downstream tools
 python Src/Loc/scripts/prepare_cafe_inputs.py --config "$CONFIG"
-python Src/Loc/scripts/prepare_badirate_inputs.py --config "$CONFIG"
