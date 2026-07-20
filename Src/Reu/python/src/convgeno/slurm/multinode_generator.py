@@ -1786,7 +1786,15 @@ if [ -n "$SCRATCH_BASE" ]; then
     export TMPDIR="$OF_TMP"
     echo "Staging WorkingDirectory to node-local scratch: $SHARED_WORK_DIR -> $WORK_DIR"
     df -h "$JOB_SCRATCH" 2>/dev/null || true
-    rsync -a --exclude='OrthoFinder' "$SHARED_WORK_DIR"/ "$WORK_DIR"/
+    # Copy the small, MSA-hot files (Species*.fa, IDs) to node-local, but SYMLINK
+    # the huge, read-once Blast{{i}}_{{j}}.txt.gz set back to shared instead of
+    # copying ~100 GB: -b reads them once (read-only) for the MCL graph, while the
+    # failure-prone MSA stage only touches the sequence files + its own new output
+    # on node-local disk. Prior OrthoFinder/ results are excluded (fresh tree).
+    rsync -a --exclude='OrthoFinder' --exclude='Blast*.txt.gz' \\
+        "$SHARED_WORK_DIR"/ "$WORK_DIR"/
+    find "$SHARED_WORK_DIR" -maxdepth 1 -name 'Blast*.txt.gz' \\
+        -exec ln -s -t "$WORK_DIR" {{}} +
     salvage_resume() {{
         trap - SIGTERM SIGINT ERR
         echo "Interrupted/failed -- salvaging results node-local -> shared..."

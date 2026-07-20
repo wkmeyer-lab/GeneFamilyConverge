@@ -1006,16 +1006,19 @@ class TestResumeScratch:
         assert '-p "$OF_TMP"' in script  # OrthoFinder pickle dir
 
     def test_stages_workdir_to_scratch_and_copies_back(self, scratch_config):
-        # The whole WorkingDirectory (n^2 Blast set + sequences) is staged to
-        # scratch, -b runs against the staged copy, and the produced results are
-        # rsynced back to the shared WorkingDirectory (same deliverable path).
+        # Symlink optimization: the small MSA-hot files are copied to node-local,
+        # the huge read-once Blast set is SYMLINKED back to shared (not copied),
+        # -b runs against the staged copy, and results are rsynced back to shared.
         script = generate_resume_script(scratch_config)
         assert 'SHARED_WORK_DIR="$WORK_DIR"' in script
         assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' in script
-        # stage-in copies the shared WorkingDirectory to scratch, excluding any
-        # prior OrthoFinder/ results so -b builds a fresh tree.
+        # stage-in copies the small files (excluding prior OrthoFinder/ results
+        # AND the Blast set), then symlinks the Blast set instead of copying it.
         assert "--exclude='OrthoFinder'" in script
+        assert "--exclude='Blast*.txt.gz'" in script
         assert '"$SHARED_WORK_DIR"/ "$WORK_DIR"/' in script
+        assert "-name 'Blast*.txt.gz'" in script
+        assert 'ln -s -t "$WORK_DIR"' in script  # Blast symlinked, not copied
         assert 'orthofinder -b "$WORK_DIR"' in script  # -b uses the staged copy
         assert (
             'rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/'

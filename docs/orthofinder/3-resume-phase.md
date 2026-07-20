@@ -148,9 +148,13 @@ scratch, choosing one of three models from the config:
   re-submit continues with **no re-search and no staging**.
 - **Ephemeral (node-local) scratch (Mode B).** Node-local disk is wiped at job
   end and can't span the chain, so the `WorkingDirectory` lives on shared; resume
-  **stages it to node-local scratch** for the MSA stage (excluding any prior
-  `OrthoFinder/` results), then copies the produced `OrthoFinder/` tree back to
-  shared before the node is released.
+  **stages it to node-local scratch** for the MSA stage, then copies the produced
+  `OrthoFinder/` tree back to shared before the node is released. The stage-in is
+  optimized: only the small MSA-hot files (`Species*.fa`, IDs) are copied, while
+  the huge, read-once `Blast{i}_{j}.txt.gz` set is **symlinked** back to shared
+  (it's read once, read-only, for the MCL graph) — avoiding a ~100 GB copy and the
+  node-local space it would need. Prior `OrthoFinder/` results are excluded so
+  `-b` builds a fresh tree.
 - **No scratch (Mode C).** `-b` runs in place on the shared `WorkingDirectory`.
 
 In every mode a SIGTERM/SIGINT/ERR trap best-effort salvages partial results to
