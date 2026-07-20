@@ -1845,6 +1845,11 @@ echo "Gene-tree method:    {method_display}"
 echo "Pickle/temp dir (-p): $OF_TMP"
 echo ""
 
+# (Re)create the pickle/temp dir right before launching OrthoFinder: a long
+# stage-in rsync can leave the empty scratch dir idle long enough for the pool
+# to reap it, and OrthoFinder aborts at startup if -p does not exist.
+mkdir -p "$OF_TMP"
+
 # Run under 'set +e' so a non-zero exit is captured (not aborted by set -e),
 # letting the cleanup below run and the exit code propagate.
 set +e

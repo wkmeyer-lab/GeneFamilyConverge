@@ -959,6 +959,15 @@ class TestResumeScriptTmpdirAndThreads:
         of = script.index('orthofinder -b "$WORK_DIR"')
         assert script.rfind("set +e", 0, of) != -1  # set +e before the command
 
+    def test_resume_creates_pickle_dir_right_before_b(self, config_threads_unset):
+        # A long stage-in can leave the empty scratch -p dir idle long enough to
+        # be reaped by the pool; ensure the script (re)creates $OF_TMP right
+        # before -b so OrthoFinder's startup existence check on -p passes.
+        script = generate_resume_script(config_threads_unset)
+        mk = script.rfind('mkdir -p "$OF_TMP"')
+        of = script.index('orthofinder -b "$WORK_DIR"')
+        assert mk != -1 and mk < of
+
 
 class TestResumeScratch:
     """Resume stages the WorkingDirectory to scratch, runs -b there, copies back."""
