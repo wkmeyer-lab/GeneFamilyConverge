@@ -7,8 +7,9 @@ orthofinder:
   command: orthofinder
 
 # r8s makes the species tree ultrametric. It is NOT on conda/bioconda:
-# install it from source / a prebuilt binary (SourceForge / ginger.ucdavis.edu)
-# and point `command` at it (HPC absolute paths go in tool_paths.local.yaml).
+# build it from source with tools/r8s/install_r8s.sh (see tools/r8s/README.md),
+# then either put it on PATH or set the absolute `command` here /
+# in tool_paths.local.yaml.
 r8s:
   command: r8s
 

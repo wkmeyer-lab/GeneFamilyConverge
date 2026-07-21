@@ -571,8 +571,8 @@ def make_ultrametric(
     if not dry_run and not check_tool_available(r8s_path):
         raise FileNotFoundError(
             f"r8s not found or not executable: '{r8s_path}'. r8s is not on conda; "
-            "install it from source / a prebuilt binary and set its path (e.g. in "
-            "tool_paths.local.yaml)."
+            "build it with tools/r8s/install_r8s.sh (see tools/r8s/README.md), then "
+            "put it on PATH or set its path in tool_paths.local.yaml."
         )
 
     cmd = build_command(control_path, tool_path=r8s_path)

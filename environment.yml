@@ -34,6 +34,10 @@ dependencies:
   # - hmmer >=3.3
   # - snakemake >=8.0
 
+  # NOTE: r8s (ultrametric step) is NOT on conda — build it from source with
+  #   ./tools/r8s/install_r8s.sh   (see tools/r8s/README.md)
+  # CAFE-5 is likewise installed separately (see docs / tool_paths.yaml).
+
   # --- pip-only packages ---
   - pip
   - pip:

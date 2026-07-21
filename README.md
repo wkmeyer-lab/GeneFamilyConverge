@@ -57,6 +57,8 @@ Everything below documents the **implemented** parts.
 - Python **3.10–3.12**.
 - Bioinformatics tools (installed by the conda env): **OrthoFinder 2.5.5**,
   **DIAMOND 2.1.9**, **MCL**, **FastTree**, **FastME**, **MAFFT**.
+- **r8s 1.81** for the ultrametric step — **not** on conda; build it from source
+  with [`tools/r8s/install_r8s.sh`](tools/r8s/README.md).
 
 ## Installation
 
@@ -68,6 +70,10 @@ pip install -e Src/Reu/python/     # editable install of the convgeno package
 
 The env is named **`convgeno`** and installs the tools above plus the Python
 package (with its `convgeno` CLI).
+
+> **r8s** (needed to make the species tree ultrametric for CAFE-5) is not on
+> conda. After the env is set up, build it once with
+> `./tools/r8s/install_r8s.sh` — see [`tools/r8s/README.md`](tools/r8s/README.md).
 
 > On a cluster, run **`convgeno init`** once (below). It detects your partition,
 > cores, memory, QOS, and scratch, and records absolute conda paths so generated
