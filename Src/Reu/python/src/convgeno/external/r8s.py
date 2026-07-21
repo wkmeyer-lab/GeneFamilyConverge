@@ -568,7 +568,7 @@ def make_ultrametric(
     control_path.write_text(control_text, encoding="utf-8")
     logger.info("Wrote r8s control file: %s", control_path)
 
-    if not check_tool_available(r8s_path):
+    if not dry_run and not check_tool_available(r8s_path):
         raise FileNotFoundError(
             f"r8s not found or not executable: '{r8s_path}'. r8s is not on conda; "
             "install it from source / a prebuilt binary and set its path (e.g. in "
