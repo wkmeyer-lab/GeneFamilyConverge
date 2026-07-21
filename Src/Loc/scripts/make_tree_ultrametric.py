@@ -31,6 +31,9 @@ Notes
   OrthoFinder proteome basenames).
 - ``nsites`` is auto-derived from ``MultipleSequenceAlignments/
   SpeciesTreeAlignment.fa`` (MSA mode); override with ``--nsites``.
+- Dating uses a single penalized-likelihood fit at ``--smoothing`` (default
+  100). ``--cross-validate`` auto-selects smoothing but scales ~O(taxa), so it
+  is only feasible for small trees.
 - r8s is not on conda; install it separately and set ``r8s.command`` in
   ``tool_paths.yaml`` or pass ``--r8s-path``.  ``--dry-run`` writes the control
   file without running r8s.
@@ -242,6 +245,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--algorithm", default="tn", help="r8s divtime algorithm (default: tn)."
     )
     parser.add_argument(
+        "--smoothing",
+        type=float,
+        default=None,
+        help="PL smoothing for a single fit "
+        "(default: config ultrametric.smoothing, else 100).",
+    )
+    parser.add_argument(
+        "--cross-validate",
+        action="store_true",
+        help="Cross-validate smoothing instead of a single fit. Accurate but "
+        "scales ~O(taxa) — only practical for small trees.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the r8s control file and log the command without running r8s.",
@@ -305,12 +321,23 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
 
     r8s_path = args.r8s_path or _dig(tools, "r8s", "command") or "r8s"
 
+    smoothing = args.smoothing
+    if smoothing is None:
+        cfg_smoothing = _dig(config, "ultrametric", "smoothing")
+        smoothing = float(cfg_smoothing) if cfg_smoothing is not None else 100.0
+
+    cross_validate = args.cross_validate or bool(
+        _dig(config, "ultrametric", "cross_validate")
+    )
+
     return {
         "of_dir": Path(of_dir),
         "output": Path(output),
         "nsites": nsites,
         "calibrations": calibrations,
         "r8s_path": r8s_path,
+        "smoothing": smoothing,
+        "cross_validate": cross_validate,
     }
 
 
@@ -340,15 +367,23 @@ def main(argv: list[str] | None = None) -> int:
             r8s_path=resolved["r8s_path"],
             method=args.method,
             algorithm=args.algorithm,
+            smoothing=resolved["smoothing"],
+            cross_validate=resolved["cross_validate"],
             dry_run=args.dry_run,
         )
     except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
         logger.error("%s", exc)
         return 1
 
+    dating = (
+        "cross-validated smoothing"
+        if stats.get("cross_validate")
+        else f"fixed smoothing={stats['smoothing']:g}"
+    )
     print(f"nsites:        {stats['nsites']}")
     print(f"calibrations:  {stats['n_calibrations']}")
     print(f"tips ({len(stats['tips'])}):     {', '.join(stats['tips'])}")
+    print(f"dating:        {args.method} ({dating})")
     print(f"control file:  {stats['r8s_ctl']}")
 
     if stats.get("dry_run"):

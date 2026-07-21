@@ -55,6 +55,13 @@ ultrametric:
     - name: humancat
       taxa: [human, cat]
       age: 94
+  # Penalized-likelihood smoothing for a single r8s fit (higher = closer to a
+  # strict clock). This is the fast, scalable default.
+  smoothing: 100
+  # Cross-validate smoothing instead of the fixed value above. More rigorous but
+  # re-optimizes the whole tree per terminal per smoothing value (~O(taxa)
+  # slower) — only practical for small trees. Leave false for genome-scale trees.
+  cross_validate: false
   # Where make_tree_ultrametric writes the dated tree (consumed by CAFE-5 prep).
   output: Data/interim/cafe_input/species_tree_ultrametric.nwk
 

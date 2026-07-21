@@ -321,8 +321,8 @@ def sanitize_tree_for_r8s(newick_in: Path | str) -> str:
 # ===================================================================
 
 
-def _fmt_age(value: float) -> str:
-    """Format an age without a spurious trailing ``.0`` (e.g. 94.0 -> ``94``)."""
+def _fmt_number(value: float) -> str:
+    """Format a number without a spurious trailing ``.0`` (e.g. 94.0 -> ``94``)."""
     return f"{value:g}"
 
 
@@ -344,15 +344,37 @@ def _calibration_lines(calibrations: list[Calibration]) -> tuple[list[str], list
         sp1, sp2 = cal.taxa
         mrca_lines.append(f"mrca {cal.name} {sp1} {sp2};")
         if cal.age is not None:
-            age_lines.append(f"fixage taxon={cal.name} age={_fmt_age(cal.age)};")
+            age_lines.append(f"fixage taxon={cal.name} age={_fmt_number(cal.age)};")
         else:
             parts = [f"constrain taxon={cal.name}"]
             if cal.min_age is not None:
-                parts.append(f"min_age={_fmt_age(cal.min_age)}")
+                parts.append(f"min_age={_fmt_number(cal.min_age)}")
             if cal.max_age is not None:
-                parts.append(f"max_age={_fmt_age(cal.max_age)}")
+                parts.append(f"max_age={_fmt_number(cal.max_age)}")
             age_lines.append(" ".join(parts) + ";")
     return mrca_lines, age_lines
+
+
+def _divtime_lines(
+    method: str, algorithm: str, smoothing: float, cross_validate: bool
+) -> list[str]:
+    """Build the r8s smoothing / ``divtime`` command line(s).
+
+    Default (``cross_validate=False``): a single penalized-likelihood fit at a
+    fixed smoothing level. Cross-validation re-optimizes the whole tree once per
+    terminal per smoothing value, so it scales as ~O(taxa) and is only practical
+    for small trees — hence it is opt-in.
+    """
+    if cross_validate:
+        return [
+            f"divtime method={method} algorithm={algorithm} "
+            "cvStart=0 cvInc=0.5 cvNum=8 crossv=yes;"
+        ]
+    lines: list[str] = []
+    if method == "pl":
+        lines.append(f"set smoothing={_fmt_number(smoothing)};")
+    lines.append(f"divtime method={method} algorithm={algorithm};")
+    return lines
 
 
 def build_r8s_control(
@@ -362,11 +384,14 @@ def build_r8s_control(
     *,
     method: str = "pl",
     algorithm: str = "tn",
+    smoothing: float = 100.0,
+    cross_validate: bool = False,
 ) -> str:
     """Build the NEXUS-style r8s control file text.
 
-    Mirrors the CAFE-5 tutorial's ``prep_r8s.py`` output, generalised to support
-    multiple calibrations and windowed constraints.
+    Based on the CAFE-5 tutorial's ``prep_r8s.py``, generalised to support
+    multiple calibrations, windowed constraints, and a configurable smoothing /
+    cross-validation policy.
 
     Parameters
     ----------
@@ -380,7 +405,15 @@ def build_r8s_control(
         ``min_age``+``max_age`` window) is needed for r8s to set an absolute
         timescale; otherwise a warning is logged.
     method, algorithm : str
-        r8s ``divtime`` options (defaults ``pl`` / ``tn`` as in the tutorial).
+        r8s ``divtime`` options (defaults ``pl`` / ``tn``).
+    smoothing : float
+        Penalized-likelihood smoothing level used for a single fit (``set
+        smoothing=…``). Ignored when ``cross_validate`` is True or ``method`` is
+        not ``pl``.
+    cross_validate : bool
+        If True, cross-validate the smoothing parameter instead of a single fit.
+        Accurate but scales as ~O(taxa) (the tutorial default) — only practical
+        for small trees, so it is opt-in.
 
     Returns
     -------
@@ -412,6 +445,8 @@ def build_r8s_control(
             "r8s may be unable to set an absolute timescale."
         )
 
+    divtime_lines = _divtime_lines(method, algorithm, smoothing, cross_validate)
+
     lines = [
         "#NEXUS",
         "begin trees;",
@@ -422,10 +457,7 @@ def build_r8s_control(
         "collapse;",
         *mrca_lines,
         *age_lines,
-        (
-            f"divtime method={method} algorithm={algorithm} "
-            "cvStart=0 cvInc=0.5 cvNum=8 crossv=yes;"
-        ),
+        *divtime_lines,
         "describe plot=chronogram;",
         "describe plot=tree_description;",
         "end;",
@@ -494,6 +526,8 @@ def make_ultrametric(
     r8s_path: str = "r8s",
     method: str = "pl",
     algorithm: str = "tn",
+    smoothing: float = 100.0,
+    cross_validate: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """Run the full OrthoFinder-tree → ultrametric-tree step via r8s.
@@ -520,8 +554,9 @@ def make_ultrametric(
         Override the auto-derived alignment column count.
     r8s_path : str
         Path to (or name of) the r8s binary.
-    method, algorithm : str
-        Passed to :func:`build_r8s_control`.
+    method, algorithm, smoothing, cross_validate
+        Passed to :func:`build_r8s_control`. Default is a single PL fit at
+        ``smoothing``; set ``cross_validate=True`` only for small trees.
     dry_run : bool
         Write the control file and log the command, but do not run r8s.
 
@@ -562,7 +597,13 @@ def make_ultrametric(
 
     sanitized = sanitize_tree_for_r8s(species_tree_path)
     control_text = build_r8s_control(
-        sanitized, nsites, calibrations, method=method, algorithm=algorithm
+        sanitized,
+        nsites,
+        calibrations,
+        method=method,
+        algorithm=algorithm,
+        smoothing=smoothing,
+        cross_validate=cross_validate,
     )
     control_path = work_dir / "r8s_ctl_file.txt"
     control_path.write_text(control_text, encoding="utf-8")
@@ -582,6 +623,8 @@ def make_ultrametric(
         "nsites": nsites,
         "n_calibrations": len(calibrations),
         "tips": sorted(tip_names),
+        "smoothing": smoothing,
+        "cross_validate": cross_validate,
         "r8s_ctl": str(control_path),
         "out_tree": str(out_tree),
     }

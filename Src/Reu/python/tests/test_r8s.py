@@ -145,6 +145,31 @@ class TestBuildR8sControl:
         assert "divtime method=pl algorithm=tn" in ctl
         assert "describe plot=tree_description;" in ctl
 
+    def test_default_is_single_pl_fit_no_crossv(self):
+        ctl = r8s.build_r8s_control(
+            self.TREE, 12, [Calibration("hc", ("human", "cat"), age=94)]
+        )
+        assert "set smoothing=100;" in ctl
+        assert "divtime method=pl algorithm=tn;" in ctl
+        assert "crossv" not in ctl  # cross-validation is opt-in
+
+    def test_custom_smoothing(self):
+        ctl = r8s.build_r8s_control(
+            self.TREE, 12, [Calibration("hc", ("human", "cat"), age=94)], smoothing=5
+        )
+        assert "set smoothing=5;" in ctl
+
+    def test_cross_validate_opt_in(self):
+        ctl = r8s.build_r8s_control(
+            self.TREE,
+            12,
+            [Calibration("hc", ("human", "cat"), age=94)],
+            cross_validate=True,
+        )
+        assert "crossv=yes" in ctl
+        assert "cvNum=8" in ctl
+        assert "set smoothing" not in ctl  # CV selects smoothing itself
+
     def test_window_calibration_emits_constrain(self):
         ctl = r8s.build_r8s_control(
             self.TREE,
@@ -267,6 +292,7 @@ class TestMakeUltrametric:
         assert captured["cmd"][:2] == ["r8s", "-b"]
         assert "blformat nsites=12 lengths=persite" in captured["ctl"]
         assert "fixage taxon=hc age=94;" in captured["ctl"]
+        assert "set smoothing=100;" in captured["ctl"]  # single PL fit by default
 
     def test_nsites_override_used_in_control(
         self, orthofinder_output_dir: Path, tmp_path: Path, monkeypatch
