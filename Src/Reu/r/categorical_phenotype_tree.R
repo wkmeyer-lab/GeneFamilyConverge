@@ -91,7 +91,7 @@ merge_phenotype_categories <- function(vec, substitutions = NULL, merge_only = N
   if (!is.null(substitutions)) {
     for (pair in substitutions) {
       from <- pair[[1]]; to <- pair[[2]]
-      out[out == from] <- to
+      out[which(out == from)] <- to   # which() drops NAs (unclassified tips)
     }
   }
   out

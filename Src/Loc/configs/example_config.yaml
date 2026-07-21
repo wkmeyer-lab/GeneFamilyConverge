@@ -65,6 +65,48 @@ ultrametric:
   # Where make_tree_ultrametric writes the dated tree (consumed by CAFE-5 prep).
   output: Data/interim/cafe_input/species_tree_ultrametric.nwk
 
+# Categorical phenotype tree = the CAFE-5 "-y" (multi-lambda) tree: the same
+# topology as the ultrametric species tree, but every branch is labelled with an
+# integer naming its phenotype / rate class (tips from the phenotype table,
+# internal branches from ancestral-state reconstruction). Built by
+# Src/Loc/scripts/make_categorical_phenotype_tree.R.
+phenotype_tree:
+  enabled: true
+  # Column in inputs.phenotype_table holding tip labels; MUST match the species
+  # tree tips (the OrthoFinder proteome basenames).
+  id_col: species
+  # Column holding the raw phenotype label to reconstruct.
+  pheno_col: phenotype
+  # Ancestral-state reconstruction model: ER (equal rates), SYM (symmetric), or
+  # ARD (all rates different).
+  model: ER
+  # Root-state prior passed to the reconstruction (auto | flat | empirical | ...).
+  root_prior: auto
+  # Optional: force EVERY internal branch to this category instead of inferring
+  # ancestral states (tips keep their own category). Leave null for real ASR.
+  anctrait: null
+  # Optional label collapsing applied BEFORE reconstruction. Keep the class count
+  # small so CAFE's multi-lambda estimation stays identifiable.
+  #   substitutions: whole-label relabels, list of [from, to]
+  #   merge_only:    only HYBRID labels containing BOTH tokens -> to, list of [a, b]
+  merges:
+    substitutions: []
+    merge_only: []
+  # Tips with no phenotype in the table:
+  #   background = give them an extra class (keeps -t / -y / -i tips aligned)
+  #   drop       = remove them (also writes a pruned -t; you must then subset the
+  #                CAFE count matrix to the same tips)
+  unclassified: background
+  # Category label used for unclassified tips when unclassified: background.
+  background_label: background
+  # Optional: path to the lab's RERConvergeFunctions.R to source when the
+  # RERconverge package is not installed (provides getAncLiks). Leave null if
+  # RERconverge is installed.
+  rer_functions: null
+  # Outputs (default under <outputs.interim_dir>/cafe_input).
+  output: Data/interim/cafe_input/lambda_tree.nwk
+  legend: Data/interim/cafe_input/lambda_legend.tsv
+
 cafe:
   enabled: true
   # Number of discrete rate categories for gamma model
