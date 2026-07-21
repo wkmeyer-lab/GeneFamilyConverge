@@ -90,6 +90,7 @@ Data/raw/*
 
 Data/interim/**/*
 !Data/interim/**/.gitkeep
+.phenotype_tree_construction_module 
 
 # --- HPC / batch jobs ---
 slurm-*.out
