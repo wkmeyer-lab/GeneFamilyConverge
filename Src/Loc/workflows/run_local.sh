@@ -21,6 +21,9 @@ python Src/Loc/scripts/prepare_proteomes.py --config "$CONFIG"
 echo "=== Running OrthoFinder ==="
 python Src/Loc/scripts/run_orthofinder.py --config "$CONFIG" --tools "$TOOLS"
 
+echo "=== Making species tree ultrametric (r8s) ==="
+python Src/Loc/scripts/make_tree_ultrametric.py --config "$CONFIG" --tools "$TOOLS"
+
 echo "=== Preparing CAFE-5 inputs ==="
 python Src/Loc/scripts/prepare_cafe_inputs.py --config "$CONFIG"
 

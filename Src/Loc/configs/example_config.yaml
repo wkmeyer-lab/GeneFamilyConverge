@@ -43,11 +43,29 @@ orthofinder:
   # Additional OrthoFinder flags (e.g., ["--fewer-files"] for large datasets)
   extra_args: []
 
+# r8s: make the OrthoFinder species tree ultrametric (required before CAFE-5).
+ultrametric:
+  # nsites: "auto" derives the alignment column count from
+  # MultipleSequenceAlignments/SpeciesTreeAlignment.fa (MSA mode), or set an int.
+  nsites: auto
+  # One or more fossil/literature calibrations. `taxa` are two tip labels
+  # (proteome basenames) whose MRCA is calibrated. Use `age` for a fixed age
+  # (Myr), or `min_age`/`max_age` for a window. Replace with YOUR taxa/ages.
+  calibrations:
+    - name: humancat
+      taxa: [human, cat]
+      age: 94
+  # Where make_tree_ultrametric writes the dated tree (consumed by CAFE-5 prep).
+  output: Data/interim/cafe_input/species_tree_ultrametric.nwk
+
 cafe:
   enabled: true
   # Number of discrete rate categories for gamma model
   n_gamma_cats: 5
   extra_args: ""
+  # Optional: exclude families with >= this many copies in any species
+  # (mirrors the CAFE-5 tutorial's size filter). Leave blank for no filter.
+  max_family_size: null
 
 runtime:
   # If true, overwrite existing intermediate outputs

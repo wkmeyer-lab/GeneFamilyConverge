@@ -30,6 +30,8 @@ echo "=== Preparing proteomes ==="
 python Src/Loc/scripts/prepare_proteomes.py --config "$CONFIG"
 
 echo "=== Submitting OrthoFinder ==="
+# The OrthoFinder job also makes the species tree ultrametric (r8s) and
+# prepares the CAFE-5 inputs once OrthoFinder finishes (see submit_orthofinder.sbatch).
 JOB_OF=$(sbatch --parsable Src/Loc/workflows/submit_orthofinder.sbatch)
 echo "OrthoFinder job: $JOB_OF"
 

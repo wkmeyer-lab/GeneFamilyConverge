@@ -232,4 +232,38 @@ def orthofinder_output_dir(tmp_path: Path) -> Path:
     (msa_dir / "SpeciesTreeAlignment.fa").write_text(
         SPECIES_TREE_ALIGNMENT, encoding="utf-8"
     )
+    og_dir = results / "Orthogroups"
+    og_dir.mkdir(parents=True)
+    (og_dir / "Orthogroups_GeneCount.tsv").write_text(
+        GENE_COUNT_TSV, encoding="utf-8"
+    )
     return root
+
+
+# A dated/ultrametric tree: every root-to-tip path sums to 94.
+ULTRAMETRIC_TREE_NEWICK = "((human:47,cat:47):47,dog:94);\n"
+
+# OrthoFinder Orthogroups_GeneCount.tsv: species human/cat/dog + trailing Total.
+# OG0000002 is a "large" family (>=100 in human) for size-filter tests.
+GENE_COUNT_TSV = (
+    "Orthogroup\thuman\tcat\tdog\tTotal\n"
+    "OG0000000\t3\t2\t1\t6\n"
+    "OG0000001\t0\t1\t2\t3\n"
+    "OG0000002\t150\t1\t1\t152\n"
+)
+
+
+@pytest.fixture()
+def ultrametric_tree_file(tmp_path: Path) -> Path:
+    """Write a dated ultrametric tree and return its path."""
+    p = tmp_path / "species_tree_ultrametric.nwk"
+    p.write_text(ULTRAMETRIC_TREE_NEWICK, encoding="utf-8")
+    return p
+
+
+@pytest.fixture()
+def gene_count_file(tmp_path: Path) -> Path:
+    """Write an OrthoFinder-style gene count table and return its path."""
+    p = tmp_path / "Orthogroups_GeneCount.tsv"
+    p.write_text(GENE_COUNT_TSV, encoding="utf-8")
+    return p

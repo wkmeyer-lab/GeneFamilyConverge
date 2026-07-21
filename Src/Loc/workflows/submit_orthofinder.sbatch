@@ -16,5 +16,8 @@ TOOLS="Src/Loc/configs/tool_paths.yaml"
 
 python Src/Loc/scripts/run_orthofinder.py --config "$CONFIG" --tools "$TOOLS"
 
+# Make the species tree ultrametric (r8s) — required before CAFE-5.
+python Src/Loc/scripts/make_tree_ultrametric.py --config "$CONFIG" --tools "$TOOLS"
+
 # Prepare inputs for downstream tools
 python Src/Loc/scripts/prepare_cafe_inputs.py --config "$CONFIG"

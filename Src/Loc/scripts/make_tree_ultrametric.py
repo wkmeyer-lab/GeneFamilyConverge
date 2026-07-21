@@ -5,12 +5,17 @@ Make an OrthoFinder species tree ultrametric with r8s (for CAFE-5 input).
 CAFE-5 needs a rooted, ultrametric time tree, but OrthoFinder emits a
 non-ultrametric ``SpeciesTree_rooted.txt``.  This script derives ``nsites`` from
 the concatenated species-tree alignment, runs r8s with one or more fossil
-calibrations, and writes the dated (ultrametric) Newick.
+calibrations, writes the dated (ultrametric) Newick, and post-validates it.
 
-Basic usage (point calibration, tutorial-style)::
+Config-driven (used by the workflows)::
 
     python Src/Loc/scripts/make_tree_ultrametric.py \\
-        Data/processed/orthofinder_single_<ts> \\
+        --config Src/Loc/configs/example_config.yaml \\
+        --tools  Src/Loc/configs/tool_paths.yaml
+
+Explicit, point calibration (tutorial-style)::
+
+    python Src/Loc/scripts/make_tree_ultrametric.py <of_output_dir> \\
         -o Data/interim/cafe_input/species_tree_ultrametric.nwk \\
         -p 'human,cat' -c 94
 
@@ -22,12 +27,13 @@ Named calibrations (repeatable), point or age window::
 
 Notes
 -----
-- Calibration taxa must be tip labels in ``SpeciesTree_rooted.txt`` (i.e. the
+- Calibration taxa must be tip labels in ``SpeciesTree_rooted.txt`` (the
   OrthoFinder proteome basenames).
 - ``nsites`` is auto-derived from ``MultipleSequenceAlignments/
-  SpeciesTreeAlignment.fa`` (MSA mode); override with ``--nsites`` if needed.
-- r8s is not on conda; install it separately and pass ``--r8s-path`` (or put it
-  on ``PATH``).  Use ``--dry-run`` to write the control file without running r8s.
+  SpeciesTreeAlignment.fa`` (MSA mode); override with ``--nsites``.
+- r8s is not on conda; install it separately and set ``r8s.command`` in
+  ``tool_paths.yaml`` or pass ``--r8s-path``.  ``--dry-run`` writes the control
+  file without running r8s.
 """
 
 from __future__ import annotations
@@ -39,8 +45,11 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 from convgeno.external.r8s import Calibration, make_ultrametric
 from convgeno.utils.logging import setup_logging
+from convgeno.validation.trees import is_ultrametric, validate_tree
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +123,45 @@ def _pairs_to_calibrations(pairs: list[str], ages: list[str]) -> list[Calibratio
     return cals
 
 
-def _collect_calibrations(args: argparse.Namespace) -> list[Calibration]:
-    cals = [_parse_calibration(spec) for spec in args.calibration]
-    cals.extend(_pairs_to_calibrations(args.pairs, args.cal_ages))
-    if not cals:
-        raise ValueError(
-            "Provide at least one calibration via --calibration "
-            "or -p/--pair + -c/--cal."
-        )
+def _calibrations_from_config(entries: list[dict]) -> list[Calibration]:
+    """Build Calibrations from the config's ``ultrametric.calibrations`` list."""
+    cals: list[Calibration] = []
+    for entry in entries:
+        taxa = tuple(entry["taxa"])
+        if len(taxa) != 2:
+            raise ValueError(f"Config calibration taxa must be a pair (got {taxa!r})")
+        name = entry.get("name") or f"{taxa[0]}_{taxa[1]}"
+        kwargs = {
+            k: entry[k]
+            for k in ("age", "min_age", "max_age")
+            if entry.get(k) is not None
+        }
+        if not kwargs:
+            raise ValueError(
+                f"Config calibration {name!r} needs 'age' or 'min_age'/'max_age'."
+            )
+        cals.append(Calibration(name=_sanitize_node_name(name), taxa=taxa, **kwargs))
     return cals
+
+
+# -------------------------------------------------------------------
+# Config helpers
+# -------------------------------------------------------------------
+
+
+def _load_yaml(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+
+
+def _dig(mapping: dict, *keys: str):
+    node = mapping
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
 
 
 # -------------------------------------------------------------------
@@ -138,15 +177,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "orthofinder_output_dir",
         type=Path,
-        help="OrthoFinder -o output dir (or a Results_* dir directly).",
+        nargs="?",
+        default=None,
+        help="OrthoFinder -o output dir (or a Results_* dir). "
+        "Falls back to config orthofinder.output_dir.",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        required=True,
-        help="Output path for the ultrametric Newick tree.",
+        default=None,
+        help="Output Newick path. Falls back to config ultrametric.output.",
     )
+    parser.add_argument(
+        "--config", type=Path, default=None, help="Pipeline config YAML."
+    )
+    parser.add_argument("--tools", type=Path, default=None, help="tool_paths.yaml.")
     parser.add_argument(
         "--calibration",
         action="append",
@@ -176,29 +222,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--nsites",
         type=int,
         default=None,
-        help="Override the alignment column count (default: auto from the MSA).",
+        help="Override the alignment column count (default: auto / config).",
     )
     parser.add_argument(
         "--r8s-path",
-        default="r8s",
-        help="Path to the r8s binary (default: 'r8s' on PATH).",
+        default=None,
+        help="Path to r8s (default: tool_paths r8s.command, else 'r8s').",
     )
     parser.add_argument(
         "--work-dir",
         type=Path,
         default=None,
-        help="Scratch dir for the control file / r8s output "
-        "(default: <output-dir>/r8s_work).",
+        help="Scratch dir (default: <output-dir>/r8s_work).",
     )
     parser.add_argument(
-        "--method",
-        default="pl",
-        help="r8s divtime method (default: pl).",
+        "--method", default="pl", help="r8s divtime method (default: pl)."
     )
     parser.add_argument(
-        "--algorithm",
-        default="tn",
-        help="r8s divtime algorithm (default: tn).",
+        "--algorithm", default="tn", help="r8s divtime algorithm (default: tn)."
     )
     parser.add_argument(
         "--dry-run",
@@ -225,6 +266,54 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_inputs(args: argparse.Namespace) -> dict:
+    """Merge CLI args with config/tools files into resolved run parameters."""
+    config = _load_yaml(args.config)
+    tools = _load_yaml(args.tools)
+
+    of_dir = args.orthofinder_output_dir or _dig(config, "orthofinder", "output_dir")
+    if of_dir is None:
+        raise ValueError(
+            "OrthoFinder output dir not given: pass it positionally or set "
+            "orthofinder.output_dir in --config."
+        )
+
+    output = args.output or _dig(config, "ultrametric", "output")
+    if output is None:
+        raise ValueError(
+            "Output path not given: pass -o/--output or set ultrametric.output "
+            "in --config."
+        )
+
+    nsites = args.nsites
+    if nsites is None:
+        cfg_nsites = _dig(config, "ultrametric", "nsites")
+        if isinstance(cfg_nsites, int):
+            nsites = cfg_nsites  # a str like "auto" means auto-derive
+
+    calibrations = [_parse_calibration(spec) for spec in args.calibration]
+    calibrations.extend(_pairs_to_calibrations(args.pairs, args.cal_ages))
+    if not calibrations:
+        cfg_cals = _dig(config, "ultrametric", "calibrations")
+        if cfg_cals:
+            calibrations = _calibrations_from_config(cfg_cals)
+    if not calibrations:
+        raise ValueError(
+            "No calibrations: use --calibration / -p+-c, or add "
+            "ultrametric.calibrations to --config."
+        )
+
+    r8s_path = args.r8s_path or _dig(tools, "r8s", "command") or "r8s"
+
+    return {
+        "of_dir": Path(of_dir),
+        "output": Path(output),
+        "nsites": nsites,
+        "calibrations": calibrations,
+        "r8s_path": r8s_path,
+    }
+
+
 # -------------------------------------------------------------------
 # Entry point
 # -------------------------------------------------------------------
@@ -237,17 +326,18 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(level=args.log_level, log_file=args.log_file)
 
-    work_dir = args.work_dir or (args.output.parent / "r8s_work")
-
     try:
-        calibrations = _collect_calibrations(args)
+        resolved = _resolve_inputs(args)
+        output = resolved["output"]
+        work_dir = args.work_dir or (output.parent / "r8s_work")
+
         stats = make_ultrametric(
-            args.orthofinder_output_dir,
-            calibrations,
-            out_tree=args.output,
+            resolved["of_dir"],
+            resolved["calibrations"],
+            out_tree=output,
             work_dir=work_dir,
-            nsites=args.nsites,
-            r8s_path=args.r8s_path,
+            nsites=resolved["nsites"],
+            r8s_path=resolved["r8s_path"],
             method=args.method,
             algorithm=args.algorithm,
             dry_run=args.dry_run,
@@ -260,10 +350,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"calibrations:  {stats['n_calibrations']}")
     print(f"tips ({len(stats['tips'])}):     {', '.join(stats['tips'])}")
     print(f"control file:  {stats['r8s_ctl']}")
+
     if stats.get("dry_run"):
         print("dry run: r8s was not executed; no tree written.")
     else:
         print(f"ultrametric tree -> {stats['out_tree']}")
+        issues = validate_tree(output)
+        if not is_ultrametric(output):
+            issues.append("tree is not ultrametric within tolerance")
+        if issues:
+            logger.warning(
+                "Post-validation found %d issue(s) in %s", len(issues), output
+            )
+            print("post-validation WARNINGS:")
+            for msg in issues:
+                print(f"  ! {msg}")
+        else:
+            print("post-validation: tree is rooted, binary, and ultrametric.")
 
     if args.stats_json:
         args.stats_json.parent.mkdir(parents=True, exist_ok=True)

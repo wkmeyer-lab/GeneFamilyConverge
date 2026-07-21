@@ -6,11 +6,19 @@
 orthofinder:
   command: orthofinder
 
+# r8s makes the species tree ultrametric. It is NOT on conda/bioconda:
+# install it from source / a prebuilt binary (SourceForge / ginger.ucdavis.edu)
+# and point `command` at it (HPC absolute paths go in tool_paths.local.yaml).
+r8s:
+  command: r8s
+
 cafe:
   command: cafe5
 
 # --- HPC example (uncomment and adjust) ---
 # orthofinder:
 #   command: /share/apps/orthofinder/2.5.5/orthofinder
+# r8s:
+#   command: /share/apps/r8s/1.81/r8s
 # cafe:
 #   command: /share/apps/cafe5/5.1.0/bin/cafe5
