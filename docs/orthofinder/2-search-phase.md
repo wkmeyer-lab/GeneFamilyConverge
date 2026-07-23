@@ -46,6 +46,7 @@ search of species `i` (query) against species `j` (database) is:
 ```
 cost(i, j) = |Sᵢ| · |Sⱼ|
 ```
+SLURM ARRAY
 
 This is a proxy for `diamond blastp` runtime: both the query volume and the
 database volume drive the alignment work, so self-pairs and large×large pairs are

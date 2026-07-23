@@ -969,6 +969,24 @@ class TestResumeScriptTmpdirAndThreads:
         of = script.index('orthofinder -b "$WORK_DIR"')
         assert mk != -1 and mk < of
 
+    def test_resume_installs_mafft_shim_before_b(self, config_threads_unset):
+        # The MSA shim (fast --anysymbol + retry) must be installed before -b so
+        # OrthoFinder's mafft calls hit it instead of the L-INS-i default that
+        # stalls / emits empty alignments.
+        script = generate_resume_script(config_threads_unset)
+        assert 'export PATH="$CONVGENO_SHIM_DIR:$PATH"' in script
+        assert '"$REAL" --anysymbol "$INPUT"' in script
+        assert "--localpair" not in script  # L-INS-i never invoked
+        shim = script.index('CONVGENO_SHIM_DIR="$(mktemp -d)"')
+        of = script.index('orthofinder -b "$WORK_DIR"')
+        assert shim < of
+
+    def test_resume_guards_against_empty_alignments(self, config_threads_unset):
+        # Loud-failure net: empty alignments after a "successful" -b flip OF_EXIT.
+        script = generate_resume_script(config_threads_unset)
+        assert "empty alignments remain" in script
+        assert "-path '*Alignments_ids*' -name '*.fa' -size 0" in script
+
 
 class TestResumeScratch:
     """Resume stages the WorkingDirectory to scratch, runs -b there, copies back."""

@@ -174,6 +174,20 @@ Run under `set +e` / `set -e` so the exit code is captured (not aborted) and the
 cleanup below always runs. `-S` is **not** passed — the search program is already
 fixed in the WorkingDirectory by prepare.
 
+**MAFFT MSA shim (immediately before `-b`).** For orthogroups under 500 sequences
+OrthoFinder aligns with MAFFT **L-INS-i** (`--localpair --maxiterate 1000`), which
+on this data stalls and sporadically emits an **empty** alignment; an empty
+alignment for a single-copy orthogroup is fatal (`Species tree inference failed`).
+The fast command (`mafft --anysymbol`, which OrthoFinder itself uses for
+≥ 500-sequence OGs) aligns the same sequences instantly and reliably. So the script
+installs a tiny `mafft` **shim** into a `mktemp -d` dir prepended to `PATH`
+(`runtime.render_mafft_msa_shim`): it forces the fast command for every orthogroup,
+retries up to 3× and requires non-empty output, and passes non-alignment calls
+(the dependency test, `--version`) straight through. This is job-local — no
+`$HOME`/`config.json` edits. After `-b`, a guard fails the job loudly if any
+`Alignments_ids/*.fa` is still empty, so an incomplete species tree is never
+shipped silently. (The single-node script installs the same shim.)
+
 ### 7. Results copy-out + cleanup
 
 On success:

@@ -31,7 +31,11 @@ from convgeno.slurm.discovery import (
     detect_node_cpus,
     detect_qos_max_jobs,
 )
-from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
+from convgeno.slurm.runtime import (
+    CondaRuntimeConfig,
+    render_conda_bootstrap,
+    render_mafft_msa_shim,
+)
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
 #
@@ -1674,6 +1678,9 @@ def generate_resume_script(
         },
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
+    # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
+    # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
+    mafft_shim = render_mafft_msa_shim()
 
     # Resolve analysis threads (-a): use the configured value, falling back
     # to 1 when unset. The open-file-limit-driven auto-heuristic was removed;
@@ -1937,12 +1944,27 @@ echo ""
 # to reap it, and OrthoFinder aborts at startup if -p does not exist.
 mkdir -p "$OF_TMP"
 
+{mafft_shim}
+
 # Run under 'set +e' so a non-zero exit is captured (not aborted by set -e),
 # letting the cleanup below run and the exit code propagate.
 set +e
 orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS" -p "$OF_TMP"{method_args}{extra_suffix}
 OF_EXIT=$?
 set -e
+
+# Safety net: the MSA shim retries every alignment, but if any orthogroup
+# alignment is STILL empty (a genuinely unrecoverable OG), fail loudly rather
+# than ship an incomplete/absent species tree.
+if [ "$OF_EXIT" -eq 0 ]; then
+    EMPTY_ALN="$(find "$WORK_DIR" -path '*Alignments_ids*' -name '*.fa' -size 0 \\
+        2>/dev/null | head -20)"
+    if [ -n "$EMPTY_ALN" ]; then
+        echo "ERROR: OrthoFinder reported success but empty alignments remain:" >&2
+        echo "$EMPTY_ALN" >&2
+        OF_EXIT=1
+    fi
+fi
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))

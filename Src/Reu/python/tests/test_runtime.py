@@ -16,6 +16,7 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     detect_conda_runtime,
     render_conda_bootstrap,
+    render_mafft_msa_shim,
     runtime_config_from_dict,
     runtime_config_to_dict,
 )
@@ -276,3 +277,28 @@ class TestDetectCondaRuntimeBasic:
              patch("subprocess.run", return_value=FakeResult()):
             with pytest.raises(RuntimeError, match="conda info --base failed"):
                 detect_conda_runtime()
+
+
+class TestMafftMsaShim:
+    """The MAFFT MSA shim: force fast --anysymbol + retry, PATH-prepended."""
+
+    def test_forces_fast_anysymbol_not_linsi(self):
+        shim = render_mafft_msa_shim()
+        assert '"$REAL" --anysymbol "$INPUT"' in shim
+        # the pathological L-INS-i flags must NOT be what the shim runs
+        assert "--localpair" not in shim
+        assert "--maxiterate" not in shim
+
+    def test_retries_and_requires_nonempty_output(self):
+        shim = render_mafft_msa_shim()
+        assert "for _attempt in 1 2 3" in shim
+        assert '[ -s "$tmp" ]' in shim
+
+    def test_prepends_shim_dir_to_path(self):
+        shim = render_mafft_msa_shim()
+        assert 'CONVGENO_REAL_MAFFT="$(command -v mafft)"' in shim
+        assert 'export PATH="$CONVGENO_SHIM_DIR:$PATH"' in shim
+
+    def test_passes_through_non_alignment_calls(self):
+        # version / dependency-test invocations exec the real mafft unchanged
+        assert 'exec "$REAL" "$@"' in render_mafft_msa_shim()
