@@ -219,26 +219,6 @@ def _proteome_volume(input_dir: str) -> tuple[int, int, int]:
     return (sum(sizes), max(sizes), len(sizes))
 
 
-def _whole_chain_on_scratch(config: PipelineConfig) -> bool:
-    """True when the whole chain should run on persistent (cluster-wide) scratch.
-
-    Persistent scratch (``scratch_dir`` set and NOT ``is_ephemeral_scratch``) is a
-    shared filesystem visible to every node and retained across jobs. So the whole
-    prepare -> search -> resume chain can work there and only the final Results are
-    copied to the shared ``output_dir`` -- this avoids the resume stage-in and
-    keeps the failure-prone per-orthogroup MSA I/O off the slower group pool.
-
-    Ephemeral (node-local) scratch is wiped at job end and is invisible to other
-    nodes, so it cannot span the 3-job chain; those configs fall back to the
-    shared-home + per-job-cache path (WorkingDirectory on shared; resume stages to
-    node-local for the MSA stage).
-    """
-    return (
-        config.slurm.scratch_dir is not None
-        and not config.slurm.is_ephemeral_scratch
-    )
-
-
 def generate_prepare_script(
     config: PipelineConfig,
     runtime: CondaRuntimeConfig | None = None,
@@ -284,30 +264,21 @@ def generate_prepare_script(
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
-    # OrthoFinder's -o target. In whole-chain-on-scratch mode it is a
-    # persistent-scratch work-root (only the final Results are copied to the
-    # shared output_dir by resume); otherwise it is the shared output_dir itself.
-    # The pointer + manifests always live on the shared $OUTPUT_PARENT.
-    scratch_dir = config.slurm.scratch_dir
-    if _whole_chain_on_scratch(config):
-        work_root_block = f"""\
-{_RESOLVE_SCRATCH_FUNC}
-SCRATCH_BASE="$(resolve_scratch_base "{scratch_dir}")"
-if [ -z "$SCRATCH_BASE" ]; then
-    echo "ERROR: persistent scratch '{scratch_dir}' is not writable; cannot run the" >&2
-    echo "  whole-chain-on-scratch mode. Fix scratch or unset scratch_dir." >&2
-    exit 1
-fi
-OF_WORK_ROOT="$SCRATCH_BASE/${{RUN_NAME}}"
-if [ -e "$OF_WORK_ROOT" ]; then
-    echo "ERROR: scratch work-root already exists: $OF_WORK_ROOT" >&2
-    echo "  A prior run may be present. Remove it or use a fresh output_dir." >&2
-    exit 1
-fi
-echo "Whole-chain-on-scratch: OrthoFinder -o -> $OF_WORK_ROOT"
-echo "  (final Results are copied to $OUTPUT_DIR by the resume phase)\""""
-    else:
-        work_root_block = 'OF_WORK_ROOT="$OUTPUT_DIR"'
+    # OrthoFinder's -o target is ALWAYS the shared output_dir. The
+    # WorkingDirectory (databases + Species*.fa), the n^2 Blast results the
+    # search array writes back to it, and the final Results all live on the
+    # shared filesystem -- which is durable and visible to every node across the
+    # prepare -> search -> resume job chain. The pointer + manifests likewise
+    # live on the shared $OUTPUT_PARENT.
+    #
+    # (An earlier "whole-chain-on-scratch" mode put the WorkingDirectory on
+    # /share/ceph/scratch, but that scratch is NOT retained across separate SLURM
+    # jobs on this cluster: prepare created the WorkingDirectory there, and the
+    # search array -- a separate job on other nodes -- then could not find it.
+    # Moving the chain onto scratch was also solving the wrong problem: the resume
+    # MSA failures were caused by MAFFT L-INS-i, not the filesystem, and are fixed
+    # at the source by the shim installed in the resume script.)
+    work_root_block = 'OF_WORK_ROOT="$OUTPUT_DIR"'
 
     script = f"""\
 #!/bin/bash
@@ -1639,23 +1610,14 @@ def generate_resume_script(
     The generated script:
 
     * Runs the completeness + fd gates on the pointer's WorkingDirectory.
-    * Picks the scratch model (see :func:`_whole_chain_on_scratch`):
-
-      - **Persistent scratch (Mode A):** the whole chain already lives on
-        persistent scratch (prepare put it there), so ``-b`` runs IN PLACE with
-        no stage-in and only the final ``Results_*`` dir is copied to the shared
-        ``output_dir``. The scratch WorkingDirectory persists for the cluster's
-        purge window (Sol: 7 days), so re-submitting resume continues with no
-        re-search and no staging.
-      - **Ephemeral scratch (Mode B):** the WorkingDirectory is on shared; it is
-        staged to node-local scratch for the fast per-orthogroup MSA stage (which
-        the slower shared group pool made failure-prone), then the produced
-        ``OrthoFinder/`` tree is copied back to shared before the node is wiped.
-      - **No scratch (Mode C):** ``-b`` runs in place on the shared
-        WorkingDirectory.
-
-      In every mode a SIGTERM/SIGINT/ERR trap best-effort salvages partial
-      results, and the deliverable ends up under the shared ``output_dir``.
+    * Runs ``-b`` **in place on the shared WorkingDirectory** (where prepare
+      created it and the search array wrote the ``n^2`` Blast results). Results
+      land under it directly, so there is no stage-in and no copy-back, and the
+      deliverable is on the shared filesystem however the job ends. The MSA
+      failures this pipeline hit were caused by MAFFT L-INS-i (empty alignments),
+      not the filesystem, and are fixed at the source by the MAFFT shim installed
+      immediately before ``-b`` (plus a post-run empty-alignment guard). The
+      pickle/temp dir (``-p``) is a small project-local dir removed on success.
     * Uses ``orthofinder.analysis_threads`` for ``-a`` (falling back to 1
       when unset).
 
@@ -1709,134 +1671,38 @@ def generate_resume_script(
         method_args = ""
     method_display = method_args.strip() or "(OrthoFinder default: dendroblast)"
 
-    # Where the WorkingDirectory lives, and how the MSA stage gets fast I/O,
-    # depends on the scratch model (see _whole_chain_on_scratch):
-    #  * Mode A (persistent scratch): prepare already put the WorkingDirectory on
-    #    persistent scratch, so -b runs IN PLACE there (no stage-in); only the
-    #    final Results_* dir is copied to the shared output_dir. The scratch WD
-    #    persists (Sol: 7 days) so a re-submit resumes with no re-search.
-    #  * Mode B (ephemeral scratch): the WorkingDirectory is on shared; stage it
-    #    to node-local scratch for the MSA stage, then copy the produced
-    #    OrthoFinder/ tree back to shared (node-local is wiped at job end).
-    #  * Mode C (no scratch): run -b in place on the shared WorkingDirectory.
-    # The completeness + fd gates above always run on the pointer's WorkingDirectory.
-    scratch_dir = config.slurm.scratch_dir
-    if _whole_chain_on_scratch(config):
-        stage_block = """\
-# ---- Whole-chain-on-scratch: -b runs in place on the scratch WorkingDirectory ----
-SCRATCH_WORK_DIR="$WORK_DIR"
-OF_TMP="$(dirname "$WORK_DIR")/.of_resume_tmp"
-export TMPDIR="$OF_TMP"
-echo "Whole-chain-on-scratch: running -b in place on $WORK_DIR"
-salvage_resume() {
-    trap - SIGTERM SIGINT ERR
-    echo "Interrupted -- salvaging partial results to shared (best-effort)..."
-    if [ -d "$SCRATCH_WORK_DIR/OrthoFinder" ]; then
-        mkdir -p "$OUTPUT_DIR"
-        rsync -a "$SCRATCH_WORK_DIR"/OrthoFinder/Results_* "$OUTPUT_DIR"/ || true
-    fi
-}
-trap salvage_resume SIGTERM SIGINT ERR"""
-        finish_success_block = """\
-trap - SIGTERM SIGINT ERR
-mkdir -p "$OUTPUT_DIR"
-for R in "$SCRATCH_WORK_DIR"/OrthoFinder/Results_*; do
-    [ -d "$R" ] || continue
-    echo "Copying final results to shared: $R -> $OUTPUT_DIR/"
-    rsync -a "$R" "$OUTPUT_DIR"/
-done
-echo "WorkingDirectory left on scratch ($SCRATCH_WORK_DIR); re-submit to continue."\
-"""
-        finish_failure_block = """\
-trap - SIGTERM SIGINT ERR
-if [ -d "$SCRATCH_WORK_DIR/OrthoFinder" ]; then
-    echo "Salvaging partial results to shared (best-effort)..."
-    mkdir -p "$OUTPUT_DIR"
-    rsync -a "$SCRATCH_WORK_DIR"/OrthoFinder/Results_* "$OUTPUT_DIR"/ || true
-fi
-echo "Scratch WorkingDirectory left at $SCRATCH_WORK_DIR; re-submit to continue."\
-"""
-    elif scratch_dir is None:
-        # Mode C: run -b in place on the shared WorkingDirectory; temp on a
-        # project-local dir removed on success.
-        stage_block = """\
-# ---- No scratch configured: run -b in place on the shared WorkingDirectory ----
+    # The WorkingDirectory lives on the shared filesystem (prepare created it
+    # there; the search array wrote the n^2 Blast results back to it). Resume runs
+    # -b IN PLACE on that shared WorkingDirectory: results land under it directly,
+    # so there is nothing to stage in or copy back, and the deliverable is already
+    # on shared no matter how the job ends. The failure-prone part of the MSA stage
+    # was never the filesystem -- it was MAFFT L-INS-i stalling / emitting empty
+    # alignments -- which the shim installed just before -b fixes at the source.
+    # The pickle/temp dir (-p) is a small project-local dir removed on success.
+    # (An earlier design staged the WorkingDirectory onto /share/ceph/scratch; that
+    # scratch is not retained across the separate prepare/search/resume SLURM jobs
+    # on this cluster, so the WorkingDirectory vanished at the prepare->search
+    # handoff. Keeping it on shared is both correct and simpler.)
+    stage_block = """\
+# ---- Resume runs -b in place on the shared WorkingDirectory ----
 OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"
 export TMPDIR="$OF_TMP"
 mkdir -p "$OF_TMP"
-echo "No scratch configured; running -b in place on shared. Temp: $OF_TMP\""""
-        finish_success_block = """\
+echo "Running -b in place on the shared WorkingDirectory. Temp: $OF_TMP\""""
+    # `|| true` so a non-zero find (e.g. transient) can never turn a successful
+    # OrthoFinder run into a job failure at the reporting step (set -e + pipefail).
+    finish_success_block = """\
+FINAL_RESULTS="$(find "$WORK_DIR/OrthoFinder" -maxdepth 1 -name 'Results_*' -type d \\
+    2>/dev/null | sort | tail -1)" || true
 echo "Removing temp: $OF_TMP"
-rm -rf "$OF_TMP" || true\
-"""
-        finish_failure_block = 'echo "Preserving temp for debugging: $OF_TMP"'
-    else:
-        # Mode B: ephemeral (node-local) scratch. Stage the shared WorkingDirectory
-        # to node-local for the fast MSA stage, then copy the produced OrthoFinder/
-        # tree back to shared (node-local is wiped when the job ends).
-        stage_block = f"""\
-# ---- Ephemeral scratch: stage shared WorkingDirectory to node-local, copy back ----
-SHARED_WORK_DIR="$WORK_DIR"
-PREFERRED_SCRATCH="{scratch_dir}"
-FALLBACK_SCRATCH="/tmp/scratch"
-{_RESOLVE_SCRATCH_FUNC}
-SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
-if [ -z "$SCRATCH_BASE" ]; then
-    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
-fi
-if [ -n "$SCRATCH_BASE" ]; then
-    USE_SCRATCH=1
-    JOB_SCRATCH="$SCRATCH_BASE/${{SLURM_JOB_ID}}_of_resume"
-    WORK_DIR="$JOB_SCRATCH/WorkingDirectory"
-    OF_TMP="$JOB_SCRATCH/tmp"
-    mkdir -p "$WORK_DIR" "$OF_TMP"
-    export TMPDIR="$OF_TMP"
-    echo "Staging WorkingDirectory to node-local scratch: $SHARED_WORK_DIR -> $WORK_DIR"
-    df -h "$JOB_SCRATCH" 2>/dev/null || true
-    # Copy the small, MSA-hot files (Species*.fa, IDs) to node-local, but SYMLINK
-    # the huge, read-once Blast{{i}}_{{j}}.txt.gz set back to shared instead of
-    # copying ~100 GB: -b reads them once (read-only) for the MCL graph, while the
-    # failure-prone MSA stage only touches the sequence files + its own new output
-    # on node-local disk. Prior OrthoFinder/ results are excluded (fresh tree).
-    rsync -a --exclude='OrthoFinder' --exclude='Blast*.txt.gz' \\
-        "$SHARED_WORK_DIR"/ "$WORK_DIR"/
-    find "$SHARED_WORK_DIR" -maxdepth 1 -name 'Blast*.txt.gz' \\
-        -exec ln -s -t "$WORK_DIR" {{}} +
-    salvage_resume() {{
-        trap - SIGTERM SIGINT ERR
-        echo "Interrupted/failed -- salvaging results node-local -> shared..."
-        if [ -d "$WORK_DIR/OrthoFinder" ]; then
-            rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/ || true
-        fi
-    }}
-    trap salvage_resume SIGTERM SIGINT ERR
-else
-    USE_SCRATCH=0
-    OF_TMP="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
-    export TMPDIR="$OF_TMP"
-    mkdir -p "$OF_TMP"
-    echo "No writable scratch; running -b in place on shared. Temp: $OF_TMP"
-fi"""
-        finish_success_block = """\
-if [ "$USE_SCRATCH" = "1" ]; then
-    echo "Copying OrthoFinder results: node-local -> shared"
-    mkdir -p "$SHARED_WORK_DIR/OrthoFinder"
-    rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/
-    trap - SIGTERM SIGINT ERR
-    echo "Cleaning up node-local scratch: $JOB_SCRATCH"
-    rm -rf "$JOB_SCRATCH" || true
-else
-    echo "Removing temp: $OF_TMP"
-    rm -rf "$OF_TMP" || true
+rm -rf "$OF_TMP" || true
+if [ -n "$FINAL_RESULTS" ]; then
+    echo "Final OrthoFinder results: $FINAL_RESULTS"
 fi\
 """
-        finish_failure_block = """\
-trap - SIGTERM SIGINT ERR
-if [ "$USE_SCRATCH" = "1" ] && [ -d "$WORK_DIR/OrthoFinder" ]; then
-    echo "Salvaging partial results: node-local -> shared"
-    rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/ || true
-fi
-echo "Left for debugging: ${JOB_SCRATCH:-$OF_TMP}."\
+    finish_failure_block = """\
+echo "Preserving temp for debugging: $OF_TMP"
+echo "Partial results (if any) are in place under: $WORK_DIR/OrthoFinder"\
 """
 
     script = f"""\
@@ -1939,9 +1805,8 @@ echo "Gene-tree method:    {method_display}"
 echo "Pickle/temp dir (-p): $OF_TMP"
 echo ""
 
-# (Re)create the pickle/temp dir right before launching OrthoFinder: a long
-# stage-in rsync can leave the empty scratch dir idle long enough for the pool
-# to reap it, and OrthoFinder aborts at startup if -p does not exist.
+# (Re)create the pickle/temp dir right before launching OrthoFinder in case
+# anything reaped it: OrthoFinder aborts at startup if -p does not exist.
 mkdir -p "$OF_TMP"
 
 {mafft_shim}

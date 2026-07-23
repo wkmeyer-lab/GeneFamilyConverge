@@ -24,7 +24,6 @@ from convgeno.slurm.multinode_generator import (
     SearchCommand,
     _parse_species_pair,
     _proteome_volume,
-    _whole_chain_on_scratch,
     build_all_pairs_search_commands,
     build_search_commands,
     compute_required_open_files,
@@ -961,9 +960,9 @@ class TestResumeScriptTmpdirAndThreads:
         assert script.rfind("set +e", 0, of) != -1  # set +e before the command
 
     def test_resume_creates_pickle_dir_right_before_b(self, config_threads_unset):
-        # A long stage-in can leave the empty scratch -p dir idle long enough to
-        # be reaped by the pool; ensure the script (re)creates $OF_TMP right
-        # before -b so OrthoFinder's startup existence check on -p passes.
+        # If the pool reaps the empty -p dir, OrthoFinder aborts at startup;
+        # ensure the script (re)creates $OF_TMP right before -b so OrthoFinder's
+        # startup existence check on -p passes.
         script = generate_resume_script(config_threads_unset)
         mk = script.rfind('mkdir -p "$OF_TMP"')
         of = script.index('orthofinder -b "$WORK_DIR"')
@@ -988,19 +987,28 @@ class TestResumeScriptTmpdirAndThreads:
         assert "-path '*Alignments_ids*' -name '*.fa' -size 0" in script
 
 
-class TestResumeScratch:
-    """Resume stages the WorkingDirectory to scratch, runs -b there, copies back."""
+class TestResumeInPlaceOnShared:
+    """Resume ALWAYS runs -b in place on the shared WorkingDirectory.
 
-    @pytest.fixture()
-    def scratch_config(self, sample_runtime) -> PipelineConfig:
+    The WorkingDirectory lives on shared (prepare created it there; the search
+    array wrote the n^2 Blast results back to it), which is durable and visible
+    across the SEPARATE prepare/search/resume SLURM jobs. Resume runs -b in place
+    on it with the MAFFT shim -- there is NO scratch staging of the
+    WorkingDirectory in any config, because scratch is not retained across the
+    job chain on this cluster and the MSA failures were caused by MAFFT L-INS-i,
+    not the filesystem.
+    """
+
+    @staticmethod
+    def _cfg(sample_runtime, *, scratch_dir=None, ephemeral=False):
         return PipelineConfig(
             project_dir="/share/ceph/project",
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=48,
                 mem="350400M",
-                scratch_dir="/local/scratch",
-                is_ephemeral_scratch=True,
+                scratch_dir=scratch_dir,
+                is_ephemeral_scratch=ephemeral,
             ),
             orthofinder=OrthoFinderConfig(
                 input_dir="/in",
@@ -1011,99 +1019,81 @@ class TestResumeScratch:
             runtime=sample_runtime,
         )
 
-    def test_reuses_resolve_scratch_base(self, scratch_config):
-        script = generate_resume_script(scratch_config)
-        assert "resolve_scratch_base" in script
-        assert 'PREFERRED_SCRATCH="/local/scratch"' in script
-        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+    # Every scratch config -- none, ephemeral node-local, persistent cluster-wide.
+    _SCRATCH_CASES = [
+        (None, False),
+        ("/local/scratch", True),
+        ("/share/ceph/scratch/prm526", False),
+    ]
 
-    def test_routes_pickle_and_tmpdir_to_scratch(self, scratch_config):
-        script = generate_resume_script(scratch_config)
-        assert 'OF_TMP="$JOB_SCRATCH/tmp"' in script
-        assert 'export TMPDIR="$OF_TMP"' in script
-        assert '-p "$OF_TMP"' in script  # OrthoFinder pickle dir
-
-    def test_stages_workdir_to_scratch_and_copies_back(self, scratch_config):
-        # Symlink optimization: the small MSA-hot files are copied to node-local,
-        # the huge read-once Blast set is SYMLINKED back to shared (not copied),
-        # -b runs against the staged copy, and results are rsynced back to shared.
-        script = generate_resume_script(scratch_config)
-        assert 'SHARED_WORK_DIR="$WORK_DIR"' in script
-        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' in script
-        # stage-in copies the small files (excluding prior OrthoFinder/ results
-        # AND the Blast set), then symlinks the Blast set instead of copying it.
-        assert "--exclude='OrthoFinder'" in script
-        assert "--exclude='Blast*.txt.gz'" in script
-        assert '"$SHARED_WORK_DIR"/ "$WORK_DIR"/' in script
-        assert "-name 'Blast*.txt.gz'" in script
-        assert 'ln -s -t "$WORK_DIR"' in script  # Blast symlinked, not copied
-        assert 'orthofinder -b "$WORK_DIR"' in script  # -b uses the staged copy
-        assert (
-            'rsync -a "$WORK_DIR/OrthoFinder"/ "$SHARED_WORK_DIR/OrthoFinder"/'
-            in script
-        )  # copy-back
-
-    def test_salvage_trap_copies_results_back(self, scratch_config):
-        # On interruption/error the trap salvages produced results scratch->shared.
-        script = generate_resume_script(scratch_config)
-        assert "salvage_resume" in script
-        assert "trap salvage_resume SIGTERM SIGINT ERR" in script
-
-    def test_ephemeral_scratch_is_removed(self, scratch_config):
-        # Ephemeral (node-local) scratch stage dir IS removed on success.
-        script = generate_resume_script(scratch_config)
-        assert 'rm -rf "$JOB_SCRATCH"' in script
-        assert "Cleaning up node-local scratch" in script
-
-    def test_persistent_scratch_runs_in_place_mode_a(self, sample_runtime):
-        # Persistent (cluster-wide) scratch -> whole-chain-on-scratch (Mode A):
-        # resume runs -b IN PLACE on the scratch WorkingDirectory (no stage-in, no
-        # resolve_scratch_base in resume, WORK_DIR not reassigned to a staging
-        # path) and copies the final Results_* to the shared output_dir.
-        cfg = PipelineConfig(
-            project_dir="/p",
-            slurm=SlurmConfig(
-                partition="hawkcpu",
-                cpus_per_task=48,
-                mem="350400M",
-                scratch_dir="/share/ceph/scratch",
-                is_ephemeral_scratch=False,
-            ),
-            orthofinder=OrthoFinderConfig(
-                input_dir="/in",
-                output_dir="/out/run",
-                search_threads=48,
-                analysis_threads=12,
-            ),
-            runtime=sample_runtime,
+    @pytest.mark.parametrize("scratch_dir, ephemeral", _SCRATCH_CASES)
+    def test_no_scratch_machinery_in_any_config(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        # Regardless of scratch config, resume must NOT stage the WorkingDirectory
+        # to scratch: no resolve_scratch_base, no JOB_SCRATCH, no symlink/copy-back
+        # machinery. This is the fix for the prepare->search scratch-handoff
+        # failure (the scratch WorkingDirectory was gone by the time search ran).
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
         )
         script = generate_resume_script(cfg)
-        assert "Whole-chain-on-scratch: running -b in place" in script
-        assert "resolve_scratch_base" not in script  # no stage-in in resume
-        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' not in script
-        assert 'SCRATCH_WORK_DIR="$WORK_DIR"' in script
-        assert 'rsync -a "$R" "$OUTPUT_DIR"/' in script  # Results -> shared
-
-    def test_no_scratch_config_has_no_machinery(self, sample_config):
-        # sample_config has scratch_dir=None.
-        script = generate_resume_script(sample_config)
         assert "resolve_scratch_base" not in script
+        assert "JOB_SCRATCH" not in script
+        assert "SHARED_WORK_DIR" not in script
+        assert "ln -s -t" not in script
+        assert "salvage_resume" not in script
+
+    @pytest.mark.parametrize("scratch_dir, ephemeral", _SCRATCH_CASES)
+    def test_runs_b_in_place_on_pointer_workdir(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
+        )
+        script = generate_resume_script(cfg)
+        assert "Running -b in place on the shared WorkingDirectory" in script
+        assert 'orthofinder -b "$WORK_DIR"' in script
+
+    def test_temp_dir_is_project_local(self, sample_runtime):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir="/share/ceph/scratch", ephemeral=False
+        )
+        script = generate_resume_script(cfg)
         assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+        assert 'export TMPDIR="$OF_TMP"' in script
+
+    def test_cleans_temp_and_reports_results_on_success(self, sample_runtime):
+        script = generate_resume_script(self._cfg(sample_runtime))
+        assert 'rm -rf "$OF_TMP"' in script
+        assert "Final OrthoFinder results:" in script
+        assert "-name 'Results_*'" in script
+
+    def test_preserves_temp_and_points_to_partial_on_failure(self, sample_runtime):
+        script = generate_resume_script(self._cfg(sample_runtime))
+        assert "Preserving temp for debugging" in script
+        assert "Partial results (if any) are in place" in script
 
 
-class TestWholeChainOnScratch:
-    """Mode A: persistent scratch -> whole chain on scratch; results to shared."""
+class TestPrepareOutputTarget:
+    """Prepare's -o target is ALWAYS the shared output_dir (never scratch).
 
-    @pytest.fixture()
-    def cfg(self, sample_runtime) -> PipelineConfig:
+    The WorkingDirectory must live on the shared filesystem so it survives from
+    the prepare job to the separate search-array and resume jobs. An earlier
+    mode put it on scratch; that scratch was not retained across the job chain,
+    so the search array could not find the prepare-created WorkingDirectory.
+    """
+
+    @staticmethod
+    def _cfg(sample_runtime, *, scratch_dir=None, ephemeral=False):
         return PipelineConfig(
             project_dir="/share/ceph/project",
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=48,
                 mem="350400M",
-                scratch_dir="/share/ceph/scratch/prm526",
-                is_ephemeral_scratch=False,
+                scratch_dir=scratch_dir,
+                is_ephemeral_scratch=ephemeral,
             ),
             orthofinder=OrthoFinderConfig(
                 input_dir="/in",
@@ -1114,60 +1104,36 @@ class TestWholeChainOnScratch:
             runtime=sample_runtime,
         )
 
-    def test_predicate_true_for_persistent(self, cfg):
-        assert _whole_chain_on_scratch(cfg) is True
-
-    def test_predicate_false_for_ephemeral(self, sample_runtime):
-        c = PipelineConfig(
-            project_dir="/p",
-            slurm=SlurmConfig(
-                partition="hawkcpu",
-                scratch_dir="/local/scratch",
-                is_ephemeral_scratch=True,
-            ),
-            orthofinder=OrthoFinderConfig(input_dir="/in", output_dir="/o"),
-            runtime=sample_runtime,
+    @pytest.mark.parametrize(
+        "scratch_dir, ephemeral",
+        [
+            (None, False),
+            ("/local/scratch", True),
+            ("/share/ceph/scratch/prm526", False),
+        ],
+    )
+    def test_o_targets_shared_output_dir(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
         )
-        assert _whole_chain_on_scratch(c) is False
-
-    def test_predicate_false_for_no_scratch(self, sample_config):
-        assert _whole_chain_on_scratch(sample_config) is False
-
-    def test_prepare_o_targets_scratch_work_root(self, cfg):
         script = generate_prepare_script(cfg)
-        assert "resolve_scratch_base" in script  # scratch resolved in prepare
-        assert 'OF_WORK_ROOT="$SCRATCH_BASE/${RUN_NAME}"' in script
+        assert 'OF_WORK_ROOT="$OUTPUT_DIR"' in script
         assert 'orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op' in script
-        assert 'find "$OF_WORK_ROOT"' in script
+        # The WorkingDirectory never goes on scratch in prepare anymore.
+        assert "resolve_scratch_base" not in script
+        assert 'OF_WORK_ROOT="$SCRATCH_BASE' not in script
 
-    def test_prepare_pointer_and_manifests_stay_on_shared(self, cfg):
+    def test_pointer_and_manifests_on_shared_parent(self, sample_runtime):
+        cfg = self._cfg(sample_runtime, scratch_dir="/share/ceph/scratch/prm526")
         script = generate_prepare_script(cfg)
-        # pointer + manifests derive from the shared $OUTPUT_PARENT, not scratch
+        # pointer + manifests derive from the shared $OUTPUT_PARENT.
         assert (
             'WORK_DIR_FILE="$OUTPUT_PARENT/${RUN_NAME}_working_dir_path.txt"'
             in script
         )
         assert 'MANIFEST_DIR="$OUTPUT_PARENT/${RUN_NAME}' in script
-
-    def test_prepare_non_scratch_uses_output_dir(self, sample_config):
-        # sample_config has scratch_dir=None -> OF_WORK_ROOT == OUTPUT_DIR.
-        script = generate_prepare_script(sample_config)
-        assert 'OF_WORK_ROOT="$OUTPUT_DIR"' in script
-        assert 'orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op' in script
-        assert "resolve_scratch_base" not in script
-
-    def test_resume_runs_in_place_and_copies_results(self, cfg):
-        script = generate_resume_script(cfg)
-        assert "Whole-chain-on-scratch: running -b in place" in script
-        assert 'orthofinder -b "$WORK_DIR"' in script
-        assert 'rsync -a "$R" "$OUTPUT_DIR"/' in script  # Results -> shared
-        assert "resolve_scratch_base" not in script  # no stage-in in resume
-        assert 'WORK_DIR="$JOB_SCRATCH/WorkingDirectory"' not in script
-
-    def test_resume_salvages_on_interrupt(self, cfg):
-        script = generate_resume_script(cfg)
-        assert "salvage_resume" in script
-        assert "trap salvage_resume SIGTERM SIGINT ERR" in script
 
 
 class TestLptPartition:

@@ -102,12 +102,20 @@ creates only `OUTPUT_PARENT` and aborts if `OUTPUT_DIR` already exists.
 orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op -S "$SEARCH_PROGRAM"
 ```
 
-`$OF_WORK_ROOT` is the **whole-chain-on-scratch work-root** (`<scratch_dir>/<run>`)
-when persistent, cluster-wide scratch is configured — so the `WorkingDirectory`,
-DIAMOND DBs, and (later) the `n²` Blast set all live on fast scratch for the whole
-chain, and only the final results are copied to the shared `output_dir` by resume.
-Otherwise `$OF_WORK_ROOT` is `$OUTPUT_DIR` (the previous behaviour). Either way the
-pointer, command files, and manifests are written to the shared `$OUTPUT_PARENT`.
+`$OF_WORK_ROOT` is always `$OUTPUT_DIR` — the shared `output_dir`. The
+`WorkingDirectory` (DIAMOND DBs, `Species{i}.fa`), the `n²` Blast set the search
+array writes back to it, and the final results therefore all live on the **shared
+filesystem**, which is durable and visible to every node across the three separate
+jobs of the chain (prepare → search array → resume). The pointer, command files,
+and manifests are likewise written to the shared `$OUTPUT_PARENT`.
+
+> A previous "whole-chain-on-scratch" mode put `$OF_WORK_ROOT` on
+> `<scratch_dir>/<run>`. It was removed: this cluster does not retain scratch
+> across the job boundary, so the search array (a separate job) could not find the
+> `WorkingDirectory` prepare had created on scratch. Keeping the chain on shared is
+> both correct and simpler — and the resume MSA failures that motivated the scratch
+> experiment were a MAFFT L-INS-i bug, not a filesystem problem (see the resume
+> phase doc).
 
 stdout is captured to `<RUN_NAME>_prepare_full_stdout.log`. This single run **is**
 the probe — it creates `WorkingDirectory/` (with `SpeciesIDs.txt`,
@@ -126,10 +134,10 @@ any line that is not a valid command.
 
 ### 6. Locate and record the WorkingDirectory
 
-The script finds `WorkingDirectory` under `$OF_WORK_ROOT` (scratch in
-whole-chain-on-scratch mode, else `OUTPUT_DIR`) and writes its absolute path to
-`<RUN_NAME>_working_dir_path.txt` on shared. The search and resume jobs read this
-pointer directly (a missing pointer means prepare failed).
+The script finds `WorkingDirectory` under `$OF_WORK_ROOT` (`= $OUTPUT_DIR`, on
+shared) and writes its absolute path to `<RUN_NAME>_working_dir_path.txt` on
+shared. The search and resume jobs read this pointer directly (a missing pointer
+means prepare failed).
 
 ### 7. Determine how databases were handled
 
