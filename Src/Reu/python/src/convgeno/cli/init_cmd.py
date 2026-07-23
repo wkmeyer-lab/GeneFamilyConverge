@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from pathlib import Path
 
@@ -78,22 +79,39 @@ def _parse_aligner_choice(user_input: str) -> str:
 
 def _default_orthofinder_output_dir(
     project_dir: Path,
+    mode: str,
     *,
     timestamp: str | None = None,
 ) -> Path:
-    """Return a fresh timestamped default OrthoFinder output path.
+    """Return a fresh timestamped OrthoFinder output path, named by ``mode``.
 
-    Named for the default execution mode (multinode). A single-node benchmark
-    run sits side-by-side under an ``orthofinder_single_<ts>`` dir (choose a
-    fresh ``output_dir`` for it).
+    The execution mode (``"multinode"`` / ``"singlenode"``) is baked into the
+    directory name (``orthofinder_<mode>_<ts>``) so single-node and multi-node
+    runs never collide on the same ``-o`` directory and their results are easy
+    to tell apart.
     """
     run_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     return (
         project_dir
         / "Data"
         / "processed"
-        / f"orthofinder_multinode_{run_timestamp}"
+        / f"orthofinder_{mode}_{run_timestamp}"
     )
+
+
+def _mode_config_path(base: Path, mode: str) -> Path:
+    """Mode-specific config filename derived from *base*.
+
+    ``pipeline_config.yaml`` + ``multinode`` -> ``pipeline_config_multinode.yaml``.
+    An existing ``_multinode`` / ``_singlenode`` suffix on *base* is stripped
+    first so re-running ``init`` never doubles it.
+    """
+    stem = base.stem
+    for suffix in ("_multinode", "_singlenode"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return base.with_name(f"{stem}_{mode}{base.suffix or '.yaml'}")
 
 
 def _format_detected_memory(value: int | None) -> str:
@@ -117,12 +135,22 @@ def _memory_recommendation_basis(
 
 
 def run_init(output_path: str = "pipeline_config.yaml") -> None:
-    """Run the interactive init wizard to create pipeline_config.yaml."""
-    path = Path(output_path)
+    """Run the interactive init wizard, writing one config per execution mode.
 
-    if path.exists():
+    Writes ``pipeline_config_multinode.yaml`` and ``pipeline_config_singlenode.yaml``
+    (derived from *output_path*), each with a mode-named ``output_dir``, so the
+    two jobs can be launched together without colliding on OrthoFinder's ``-o``.
+    """
+    base_path = Path(output_path)
+    mode_paths = {
+        m: _mode_config_path(base_path, m) for m in ("multinode", "singlenode")
+    }
+
+    existing = [p for p in mode_paths.values() if p.exists()]
+    if existing:
+        listed = ", ".join(str(p) for p in existing)
         answer = input(
-            f"Config file {output_path} already exists. Overwrite? [y/N]: "
+            f"Config file(s) {listed} already exist. Overwrite? [y/N]: "
         ).strip()
         if not answer.lower().startswith("y"):
             print("Aborted.")
@@ -299,9 +327,11 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         is_ephemeral_scratch=is_ephemeral_scratch,
     )
     project_path = Path(project_dir)
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # output_dir is filled in per mode when the two configs are written below.
     orthofinder = OrthoFinderConfig(
         input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
-        output_dir=str(_default_orthofinder_output_dir(project_path)),
+        output_dir="",
         search_threads=search_threads,
         analysis_threads=analysis_threads,
         msa_program=msa_program,
@@ -352,9 +382,24 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         runtime=runtime_config,
     )
 
-    config.save(path)
+    # One config per execution mode, each with a mode-named output_dir sharing
+    # this run's timestamp, so single-node and multi-node jobs never collide on
+    # OrthoFinder's -o directory.
+    written: list[tuple[str, Path, str]] = []
+    for mode, mode_path in mode_paths.items():
+        out_dir = str(
+            _default_orthofinder_output_dir(project_path, mode, timestamp=run_ts)
+        )
+        mode_of = dataclasses.replace(config.orthofinder, output_dir=out_dir)
+        mode_cfg = dataclasses.replace(config, orthofinder=mode_of)
+        mode_cfg.save(mode_path)
+        written.append((mode, mode_path, out_dir))
 
-    print(f"\nConfig written to {path}\n")
+    print("\nConfigs written (one per execution mode):")
+    for mode, mode_path, out_dir in written:
+        print(f"  {mode:10s} -> {mode_path}")
+        print(f"               output_dir: {out_dir}")
+    print("")
     print("Summary:")
     print(f"  Project directory:  {project_dir}")
     print(f"  Conda environment:  {conda_env}")

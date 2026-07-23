@@ -14,6 +14,7 @@ import pytest
 from convgeno.cli.init_cmd import (
     _default_orthofinder_output_dir,
     _derive_orthofinder_threads,
+    _mode_config_path,
     _parse_aligner_choice,
     run_init,
 )
@@ -94,14 +95,12 @@ class TestParseAlignerChoice:
 
 class TestDefaultOrthoFinderOutputDir:
     def test_default_orthofinder_output_dir_uses_timestamp(self):
-        path = _default_orthofinder_output_dir(
-            Path("/project"),
-            timestamp="20260629_181530",
-        )
-
-        assert path == Path(
-            "/project/Data/processed/orthofinder_multinode_20260629_181530"
-        )
+        assert _default_orthofinder_output_dir(
+            Path("/project"), "multinode", timestamp="20260629_181530"
+        ) == Path("/project/Data/processed/orthofinder_multinode_20260629_181530")
+        assert _default_orthofinder_output_dir(
+            Path("/project"), "singlenode", timestamp="20260629_181530"
+        ) == Path("/project/Data/processed/orthofinder_singlenode_20260629_181530")
 
 
 class TestInitCreatesConfig:
@@ -161,8 +160,11 @@ class TestInitCreatesConfig:
         ):
             run_init(output_path=str(output))
 
-        assert output.exists()
-        loaded = PipelineConfig.load(output)
+        mn_path = _mode_config_path(output, "multinode")
+        sn_path = _mode_config_path(output, "singlenode")
+        assert mn_path.exists() and sn_path.exists()
+        assert not output.exists()  # the base name itself is not written
+        loaded = PipelineConfig.load(mn_path)
         assert loaded.slurm.partition == "hawkcpu"
         assert loaded.slurm.cpus_per_task == 48
         assert loaded.slurm.mem == "350400M"
@@ -182,6 +184,12 @@ class TestInitCreatesConfig:
         assert timestamp_suffix[9:].isdigit()
         assert output_dir != static_output_dir
         assert not output_dir.exists()
+        # single-node config: same settings, mode-named output_dir, same timestamp
+        sn = PipelineConfig.load(sn_path)
+        assert sn.slurm.partition == "hawkcpu"
+        assert sn.orthofinder is not None
+        sn_dir = Path(sn.orthofinder.output_dir)
+        assert sn_dir.name == f"orthofinder_singlenode_{timestamp_suffix}"
 
     def test_no_partitions_detected(self, tmp_path: Path):
         output = tmp_path / "config.yaml"
@@ -223,7 +231,7 @@ class TestInitCreatesConfig:
         ):
             run_init(output_path=str(output))
 
-        loaded = PipelineConfig.load(output)
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
         assert loaded.slurm.partition == "gpu-partition"
         assert loaded.slurm.cpus_per_task == 32
         assert loaded.slurm.mem == "160000M"
@@ -276,7 +284,7 @@ class TestInitCreatesConfig:
             run_init(output_path=str(output))
 
         captured = capsys.readouterr()
-        loaded = PipelineConfig.load(output)
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
         assert "Could not detect partition memory limits" in captured.out
         assert loaded.slurm.mem == "350400M"
         assert loaded.slurm.mem_per_cpu is None
@@ -285,16 +293,20 @@ class TestInitCreatesConfig:
 class TestInitOverwriteBehaviour:
     def test_aborts_if_user_declines(self, tmp_path: Path):
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("existing content", encoding="utf-8")
+        # A pre-existing mode-specific config triggers the overwrite prompt.
+        existing = _mode_config_path(config_path, "multinode")
+        existing.write_text("existing content", encoding="utf-8")
 
         with patch("builtins.input", return_value="n"):
             run_init(output_path=str(config_path))
 
-        assert config_path.read_text(encoding="utf-8") == "existing content"
+        assert existing.read_text(encoding="utf-8") == "existing content"
 
     def test_overwrites_if_user_confirms(self, tmp_path: Path):
         config_path = tmp_path / "config.yaml"
-        config_path.write_text("old", encoding="utf-8")
+        _mode_config_path(config_path, "multinode").write_text(
+            "old", encoding="utf-8"
+        )
 
         inputs = iter([
             "y",          # confirm overwrite
@@ -334,7 +346,7 @@ class TestInitOverwriteBehaviour:
         ):
             run_init(output_path=str(config_path))
 
-        loaded = PipelineConfig.load(config_path)
+        loaded = PipelineConfig.load(_mode_config_path(config_path, "multinode"))
         assert loaded.slurm.partition == "testpart"
         assert loaded.slurm.mem == "120G"
 
@@ -389,4 +401,4 @@ class TestInitWarnings:
 
         captured = capsys.readouterr()
         assert "Warning" in captured.out
-        assert output.exists()
+        assert _mode_config_path(output, "multinode").exists()
