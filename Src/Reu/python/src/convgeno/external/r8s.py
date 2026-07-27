@@ -58,6 +58,7 @@ __all__ = [
     "find_results_dir",
     "find_species_tree_files",
     "sanitize_tree_for_r8s",
+    "root_spanning_taxa",
     "build_r8s_control",
     "build_command",
     "parse_ultrametric_tree",
@@ -171,20 +172,54 @@ def count_alignment_sites(alignment_path: Path | str) -> int:
 # ===================================================================
 
 
-def _candidate_results_dirs(root: Path) -> list[Path]:
-    """Return plausible ``Results_*`` directories under *root* (deduplicated).
+def _read_pointer_working_dirs(root: Path) -> list[Path]:
+    """Read multi-node ``WorkingDirectory`` pointer(s) for *root*, if present.
 
-    Handles being pointed at (a) a ``Results_*`` directory itself, (b) an
-    OrthoFinder ``-o`` output directory containing ``Results_*``, or (c) a
-    directory in which OrthoFinder created an ``OrthoFinder/Results_*`` subtree.
-    We avoid a full recursive walk (OrthoFinder ``WorkingDirectory`` holds many
-    files) by checking only these known layouts.
+    The multi-node prepare job writes ``<parent>/<name>_working_dir_path.txt``
+    (a sibling of the output dir) holding the absolute path to OrthoFinder's
+    ``WorkingDirectory``; the resume job runs ``-b`` in place there, so the final
+    results live at ``<WorkingDirectory>/OrthoFinder/Results_*``.
+    """
+    working_dirs: list[Path] = []
+    pointers = [
+        root.parent / f"{root.name}_working_dir_path.txt",
+        *root.glob("*_working_dir_path.txt"),
+    ]
+    for pointer in pointers:
+        try:
+            if pointer.is_file():
+                wd = Path(pointer.read_text(encoding="utf-8").strip())
+                if wd.is_dir():
+                    working_dirs.append(wd)
+        except OSError:
+            continue
+    return working_dirs
+
+
+def _candidate_results_dirs(root: Path) -> list[Path]:
+    """Return plausible ``Results_*`` directories for *root* (deduplicated).
+
+    Covers both workflow layouts without a full recursive walk:
+
+    - **single-node**: results at ``<root>/Results_*`` (OrthoFinder ``-o root``);
+    - **multi-node**: ``-b`` runs in place, so results are at
+      ``<WorkingDirectory>/OrthoFinder/Results_*`` (much deeper) — the
+      WorkingDirectory is read from the sibling ``*_working_dir_path.txt``
+      pointer.
+
+    Also accepts being pointed straight at a ``Results_*`` directory.
     """
     candidates = [
         root,
         *sorted(root.glob("Results_*")),
         *sorted(root.glob("OrthoFinder/Results_*")),
     ]
+    for wd in _read_pointer_working_dirs(root):
+        candidates += [
+            wd,
+            *sorted(wd.glob("Results_*")),
+            *sorted(wd.glob("OrthoFinder/Results_*")),
+        ]
     seen: set[Path] = set()
     uniq: list[Path] = []
     for candidate in candidates:
@@ -194,19 +229,33 @@ def _candidate_results_dirs(root: Path) -> list[Path]:
     return uniq
 
 
+def _recursive_results_dirs(root: Path) -> list[Path]:
+    """Last-resort: any ``Results_*`` under *root* that holds a species tree.
+
+    Handles arbitrarily deep layouts (e.g. the multi-node
+    ``Results_*/WorkingDirectory/OrthoFinder/Results_*`` nesting) when the
+    shallow + pointer checks miss. Bounded to *root*; only used as a fallback.
+    """
+    pattern = f"**/{SPECIES_TREE_RELPATH.as_posix()}"
+    return [tree.parent.parent for tree in root.glob(pattern) if tree.is_file()]
+
+
 def find_results_dir(orthofinder_output_dir: Path | str) -> Path:
     """Find the OrthoFinder ``Results_*`` directory holding the species tree.
 
-    Fulfils the behaviour stubbed in :mod:`convgeno.external.orthofinder`.  If
-    several candidate ``Results_*`` directories exist, the most recently
-    modified one is returned.
+    Robust to both the single-node (``<dir>/Results_*``) and multi-node
+    (``<WorkingDirectory>/OrthoFinder/Results_*``, via the
+    ``*_working_dir_path.txt`` pointer) layouts, and to being handed a
+    ``Results_*`` directory directly. If several candidates contain a species
+    tree, the most recently modified one wins. Fulfils the behaviour stubbed in
+    :mod:`convgeno.external.orthofinder`.
 
     Raises
     ------
     NotADirectoryError
         If *orthofinder_output_dir* is not a directory.
     FileNotFoundError
-        If no candidate directory contains ``Species_Tree/SpeciesTree_rooted.txt``.
+        If no directory containing ``Species_Tree/SpeciesTree_rooted.txt`` is found.
     """
     root = Path(orthofinder_output_dir)
     if not root.is_dir():
@@ -216,9 +265,15 @@ def find_results_dir(orthofinder_output_dir: Path | str) -> Path:
         d for d in _candidate_results_dirs(root) if (d / SPECIES_TREE_RELPATH).is_file()
     ]
     if not valid:
+        # Deep / unknown layout — walk (bounded to root) as a last resort.
+        valid = _recursive_results_dirs(root)
+    if not valid:
         raise FileNotFoundError(
             f"No OrthoFinder Results directory containing "
-            f"{SPECIES_TREE_RELPATH.as_posix()} found under {root}"
+            f"{SPECIES_TREE_RELPATH.as_posix()} found under {root}. Checked the "
+            "single-node layout (<dir>/Results_*), the multi-node WorkingDirectory "
+            "pointer (*_working_dir_path.txt), and a recursive search. Has "
+            "OrthoFinder finished and produced a species tree?"
         )
 
     results_dir = max(valid, key=lambda d: d.stat().st_mtime)
@@ -314,6 +369,28 @@ def sanitize_tree_for_r8s(newick_in: Path | str) -> str:
     if not newick.endswith(";"):
         newick += ";"
     return newick
+
+
+def _root_spanning_taxa(tree) -> tuple[str, str]:
+    """Two tip labels whose MRCA is the tree root (one per side of the root)."""
+    children = list(tree.root.clades)
+    if len(children) < 2:
+        raise ValueError(
+            "Cannot anchor the root: the tree root has fewer than 2 children."
+        )
+    left = children[0].get_terminals()[0].name
+    right = children[1].get_terminals()[0].name
+    return (left, right)
+
+
+def root_spanning_taxa(source: Path | str) -> tuple[str, str]:
+    """Return two tips spanning the root of *source* (a path or Newick string).
+
+    Used to anchor the root age when no species-pair calibration is supplied,
+    which lets r8s produce a relative-time ultrametric tree.
+    """
+    tree = Phylo.read(StringIO(_read_newick_text(source)), "newick")
+    return _root_spanning_taxa(tree)
 
 
 # ===================================================================
@@ -528,6 +605,7 @@ def make_ultrametric(
     algorithm: str = "tn",
     smoothing: float = 100.0,
     cross_validate: bool = False,
+    root_age: float = 1.0,
     dry_run: bool = False,
 ) -> dict:
     """Run the full OrthoFinder-tree → ultrametric-tree step via r8s.
@@ -545,7 +623,8 @@ def make_ultrametric(
     orthofinder_output_dir : Path or str
         OrthoFinder ``-o`` output dir, or a ``Results_*`` dir directly.
     calibrations : iterable of Calibration
-        One or more node calibrations.
+        Node calibrations. May be empty — then the root is anchored at
+        ``root_age`` and r8s produces a *relative-time* ultrametric tree.
     out_tree : Path or str
         Where to write the ultrametric Newick.
     work_dir : Path or str
@@ -557,6 +636,9 @@ def make_ultrametric(
     method, algorithm, smoothing, cross_validate
         Passed to :func:`build_r8s_control`. Default is a single PL fit at
         ``smoothing``; set ``cross_validate=True`` only for small trees.
+    root_age : float
+        Root age used to anchor the tree when ``calibrations`` is empty
+        (relative time; default 1.0).
     dry_run : bool
         Write the control file and log the command, but do not run r8s.
 
@@ -584,9 +666,21 @@ def make_ultrametric(
             "Using caller-supplied nsites=%d (overriding alignment count).", nsites
         )
 
-    tip_names = {
-        tip.name for tip in Phylo.read(str(species_tree_path), "newick").get_terminals()
-    }
+    species_tree_obj = Phylo.read(str(species_tree_path), "newick")
+    tip_names = {tip.name for tip in species_tree_obj.get_terminals()}
+
+    relative_time = not calibrations
+    if relative_time:
+        anchor = _root_spanning_taxa(species_tree_obj)
+        calibrations = [Calibration(name="root", taxa=anchor, age=root_age)]
+        logger.warning(
+            "No calibration supplied; producing a RELATIVE-time ultrametric tree "
+            "anchored at root age=%s via taxa %s. Supply a calibration for "
+            "absolute divergence times.",
+            _fmt_number(root_age),
+            anchor,
+        )
+
     missing = {sp for cal in calibrations for sp in cal.taxa if sp not in tip_names}
     if missing:
         raise ValueError(
@@ -622,6 +716,7 @@ def make_ultrametric(
     stats: dict = {
         "nsites": nsites,
         "n_calibrations": len(calibrations),
+        "relative_time": relative_time,
         "tips": sorted(tip_names),
         "smoothing": smoothing,
         "cross_validate": cross_validate,

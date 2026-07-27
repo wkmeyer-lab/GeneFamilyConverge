@@ -35,6 +35,7 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_ultrametric_autostep,
 )
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
@@ -1643,6 +1644,12 @@ def generate_resume_script(
     # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
     # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
     mafft_shim = render_mafft_msa_shim()
+    # Auto ultrametric step: multi-node results live deep at
+    # $WORK_DIR/OrthoFinder/Results_* — the success block resolves that as
+    # $FINAL_RESULTS, which we hand straight to make_tree_ultrametric.
+    ultrametric_block = render_ultrametric_autostep(
+        config.project_dir, "$FINAL_RESULTS"
+    )
 
     # Resolve analysis threads (-a): use the configured value, falling back
     # to 1 when unset. The open-file-limit-driven auto-heuristic was removed;
@@ -1849,6 +1856,7 @@ if [ "$OF_EXIT" -eq 0 ]; then
 {finish_success_block}
     echo "OrthoFinder multi-node run completed successfully."
     echo "Results available under the shared output directory: $OUTPUT_DIR"
+{ultrametric_block}
 else
     echo "OrthoFinder exited with code $OF_EXIT."
 {finish_failure_block}

@@ -98,6 +98,38 @@ class TestFindSpeciesTreeFiles:
             os.utime(root / name, (mtime, mtime))
         assert r8s.find_results_dir(root).name == "Results_new"
 
+    def _make_multinode_layout(self, root: Path) -> Path:
+        """Build the deep multi-node layout; return the WorkingDirectory."""
+        work_dir = root / "Results_prep" / "WorkingDirectory"
+        final_st = work_dir / "OrthoFinder" / "Results_final" / "Species_Tree"
+        final_st.mkdir(parents=True)
+        (final_st / "SpeciesTree_rooted.txt").write_text("(a,b);", encoding="utf-8")
+        return work_dir
+
+    def test_multinode_via_working_dir_pointer(self, tmp_path: Path):
+        # Results are deep under the WorkingDirectory; a sibling pointer file
+        # names it (as the multi-node prepare job writes).
+        root = tmp_path / "orthofinder_multinode_x"
+        work_dir = self._make_multinode_layout(root)
+        pointer = root.parent / f"{root.name}_working_dir_path.txt"
+        pointer.write_text(str(work_dir), encoding="utf-8")
+        assert r8s.find_results_dir(root).name == "Results_final"
+
+    def test_multinode_deep_recursive_without_pointer(self, tmp_path: Path):
+        # Even with no pointer, the recursive fallback finds the deep Results.
+        root = tmp_path / "of"
+        self._make_multinode_layout(root)
+        assert r8s.find_results_dir(root).name == "Results_final"
+
+
+class TestRootSpanningTaxa:
+    def test_returns_two_tips_spanning_root(self):
+        # root children are (human,cat) and dog -> one tip from each side
+        left, right = r8s.root_spanning_taxa("((human:1,cat:1):1,dog:2);")
+        assert left in {"human", "cat"}
+        assert right == "dog"
+        assert left != right
+
 
 # ===================================================================
 #  sanitize_tree_for_r8s
@@ -293,6 +325,28 @@ class TestMakeUltrametric:
         assert "blformat nsites=12 lengths=persite" in captured["ctl"]
         assert "fixage taxon=hc age=94;" in captured["ctl"]
         assert "set smoothing=100;" in captured["ctl"]  # single PL fit by default
+
+    def test_no_calibration_uses_root_anchor(
+        self, orthofinder_output_dir: Path, tmp_path: Path, monkeypatch
+    ):
+        # "forget about lambda": empty calibrations -> relative-time tree anchored
+        # at the root, so the auto-run never blocks on a species-pair calibration.
+        captured: dict = {}
+        monkeypatch.setattr(command_runner, "run", _fake_run_factory(captured))
+        monkeypatch.setattr(command_runner, "check_tool_available", lambda _t: True)
+
+        stats = r8s.make_ultrametric(
+            orthofinder_output_dir,
+            [],  # no calibrations
+            out_tree=tmp_path / "t.nwk",
+            work_dir=tmp_path / "w",
+            root_age=5,
+        )
+        assert stats["relative_time"] is True
+        assert stats["n_calibrations"] == 1
+        # root anchored via two root-spanning tips at the given age
+        assert "mrca root " in captured["ctl"]
+        assert "fixage taxon=root age=5;" in captured["ctl"]
 
     def test_nsites_override_used_in_control(
         self, orthofinder_output_dir: Path, tmp_path: Path, monkeypatch

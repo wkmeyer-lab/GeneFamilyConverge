@@ -51,6 +51,7 @@ from pathlib import Path
 import yaml
 
 from convgeno.external.r8s import Calibration, make_ultrametric
+from convgeno.utils.command_runner import check_tool_available
 from convgeno.utils.logging import setup_logging
 from convgeno.validation.trees import is_ultrametric, validate_tree
 
@@ -258,6 +259,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "scales ~O(taxa) — only practical for small trees.",
     )
     parser.add_argument(
+        "--root-age",
+        type=float,
+        default=None,
+        help="Root age used when no calibration is given (relative-time tree; "
+        "default: config ultrametric.root_age, else 1).",
+    )
+    parser.add_argument(
+        "--skip-if-unavailable",
+        action="store_true",
+        help="If r8s is not installed, log a message and exit 0 instead of "
+        "failing (for automatic post-OrthoFinder runs).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the r8s control file and log the command without running r8s.",
@@ -313,13 +327,14 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
         cfg_cals = _dig(config, "ultrametric", "calibrations")
         if cfg_cals:
             calibrations = _calibrations_from_config(cfg_cals)
-    if not calibrations:
-        raise ValueError(
-            "No calibrations: use --calibration / -p+-c, or add "
-            "ultrametric.calibrations to --config."
-        )
+    # No calibration is allowed: the tree is anchored at root_age (relative time).
 
     r8s_path = args.r8s_path or _dig(tools, "r8s", "command") or "r8s"
+
+    root_age = args.root_age
+    if root_age is None:
+        cfg_root_age = _dig(config, "ultrametric", "root_age")
+        root_age = float(cfg_root_age) if cfg_root_age is not None else 1.0
 
     smoothing = args.smoothing
     if smoothing is None:
@@ -338,6 +353,7 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
         "r8s_path": r8s_path,
         "smoothing": smoothing,
         "cross_validate": cross_validate,
+        "root_age": root_age,
     }
 
 
@@ -358,6 +374,19 @@ def main(argv: list[str] | None = None) -> int:
         output = resolved["output"]
         work_dir = args.work_dir or (output.parent / "r8s_work")
 
+        if (
+            args.skip_if_unavailable
+            and not args.dry_run
+            and not check_tool_available(resolved["r8s_path"])
+        ):
+            logger.warning(
+                "r8s ('%s') is not installed; skipping the ultrametric step "
+                "(--skip-if-unavailable). Build it with tools/r8s/install_r8s.sh.",
+                resolved["r8s_path"],
+            )
+            print("r8s not installed; ultrametric step skipped.")
+            return 0
+
         stats = make_ultrametric(
             resolved["of_dir"],
             resolved["calibrations"],
@@ -369,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
             algorithm=args.algorithm,
             smoothing=resolved["smoothing"],
             cross_validate=resolved["cross_validate"],
+            root_age=resolved["root_age"],
             dry_run=args.dry_run,
         )
     except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
@@ -380,8 +410,13 @@ def main(argv: list[str] | None = None) -> int:
         if stats.get("cross_validate")
         else f"fixed smoothing={stats['smoothing']:g}"
     )
+    calib = (
+        "none (relative-time, root-anchored)"
+        if stats.get("relative_time")
+        else str(stats["n_calibrations"])
+    )
     print(f"nsites:        {stats['nsites']}")
-    print(f"calibrations:  {stats['n_calibrations']}")
+    print(f"calibrations:  {calib}")
     print(f"tips ({len(stats['tips'])}):     {', '.join(stats['tips'])}")
     print(f"dating:        {args.method} ({dating})")
     print(f"control file:  {stats['r8s_ctl']}")

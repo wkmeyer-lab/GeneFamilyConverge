@@ -10,6 +10,7 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_ultrametric_autostep,
 )
 
 
@@ -213,6 +214,8 @@ echo "This is persistent scratch and will be removed by the cluster's purge poli
     # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
     # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
     mafft_shim = render_mafft_msa_shim()
+    # Auto ultrametric step: single-node results live at $OUTPUT_DIR/Results_*.
+    ultrametric_block = render_ultrametric_autostep(config.project_dir, "$OUTPUT_DIR")
 
     script = f"""\
 #!/bin/bash
@@ -336,6 +339,7 @@ fi
 
 echo "OrthoFinder completed successfully."
 {scratch_cleanup_block}
+{ultrametric_block}
 exit 0
 """
     return script

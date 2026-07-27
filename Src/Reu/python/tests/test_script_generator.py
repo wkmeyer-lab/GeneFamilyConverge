@@ -45,6 +45,31 @@ def sample_config(sample_runtime) -> PipelineConfig:
     )
 
 
+class TestUltrametricAutostep:
+    def test_single_node_includes_ultrametric_step(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert "/Src/Loc/scripts/make_tree_ultrametric.py" in script
+        assert "--skip-if-unavailable" in script
+        assert "species_tree_ultrametric.nwk" in script
+        assert '"$OUTPUT_DIR"' in script  # single-node passes the output dir
+
+    def test_single_node_script_is_valid_bash(self, sample_config, tmp_path: Path):
+        import shutil
+        import subprocess
+
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not available")
+        script_path = tmp_path / "orthofinder.sh"
+        script_path.write_text(
+            generate_orthofinder_script(sample_config), encoding="utf-8"
+        )
+        result = subprocess.run(
+            [bash, "-n", str(script_path)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+
+
 class TestGenerateOrthoFinderScript:
     def test_starts_with_shebang(self, sample_config: PipelineConfig):
         script = generate_orthofinder_script(sample_config)

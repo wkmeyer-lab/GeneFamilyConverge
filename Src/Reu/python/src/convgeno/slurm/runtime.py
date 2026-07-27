@@ -28,9 +28,43 @@ __all__ = [
     "detect_conda_runtime",
     "render_conda_bootstrap",
     "render_mafft_msa_shim",
+    "render_ultrametric_autostep",
     "runtime_config_to_dict",
     "runtime_config_from_dict",
 ]
+
+
+def render_ultrametric_autostep(project_dir: str, results_expr: str) -> str:
+    """Shell block that runs r8s on the OrthoFinder species tree after a run.
+
+    Emitted at the tail of a successful OrthoFinder job (single- or multi-node)
+    so the species tree is made ultrametric automatically. It is **non-fatal**
+    (OrthoFinder's own success is never undone by it) and **skips cleanly** when
+    r8s is not installed (``--skip-if-unavailable``).
+
+    *results_expr* is the shell expression pointing at the OrthoFinder output or
+    Results directory — ``$OUTPUT_DIR`` for single-node (results at
+    ``$OUTPUT_DIR/Results_*``), ``$FINAL_RESULTS`` for multi-node (the deep
+    ``$WORK_DIR/OrthoFinder/Results_*`` the resume script already resolves).
+    ``make_tree_ultrametric.py`` handles either depth. No species-pair
+    calibration is assumed here (relative-time, root-anchored).
+    """
+    script = f"{project_dir}/Src/Loc/scripts/make_tree_ultrametric.py"
+    return f'''\
+# ---- convgeno: auto ultrametric step (r8s; optional, non-fatal) ----
+echo "Attempting automatic ultrametric conversion of the species tree (r8s)..."
+export PATH="$HOME/.local/bin:$PATH"   # r8s from tools/r8s/install_r8s.sh installs here
+set +e
+python "{script}" \\
+    "{results_expr}" \\
+    -o "$OUTPUT_DIR/species_tree_ultrametric.nwk" \\
+    --root-age 1 \\
+    --skip-if-unavailable
+CONVGENO_R8S_STATUS=$?
+set -e
+if [ "$CONVGENO_R8S_STATUS" -ne 0 ]; then
+    echo "WARNING: ultrametric step returned $CONVGENO_R8S_STATUS (non-fatal)."
+fi'''
 
 
 def render_mafft_msa_shim() -> str:
