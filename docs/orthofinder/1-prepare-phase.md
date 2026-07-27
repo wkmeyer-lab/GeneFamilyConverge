@@ -3,7 +3,7 @@
 This document describes **Job 1 of 3** in `convgeno`'s multi-node OrthoFinder
 workflow. It is a factual walkthrough of what the prepare job does, in the order
 it actually runs. For the load-balancing math and the search array, see
-[`search-phase.md`](./search-phase.md).
+[`2-search-phase.md`](./2-search-phase.md).
 
 ---
 
@@ -99,8 +99,23 @@ creates only `OUTPUT_PARENT` and aborts if `OUTPUT_DIR` already exists.
 ### 4. Run OrthoFinder prepare (`-op`)
 
 ```
-orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op -S "$SEARCH_PROGRAM"
+orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op -S "$SEARCH_PROGRAM"
 ```
+
+`$OF_WORK_ROOT` is always `$OUTPUT_DIR` — the shared `output_dir`. The
+`WorkingDirectory` (DIAMOND DBs, `Species{i}.fa`), the `n²` Blast set the search
+array writes back to it, and the final results therefore all live on the **shared
+filesystem**, which is durable and visible to every node across the three separate
+jobs of the chain (prepare → search array → resume). The pointer, command files,
+and manifests are likewise written to the shared `$OUTPUT_PARENT`.
+
+> A previous "whole-chain-on-scratch" mode put `$OF_WORK_ROOT` on
+> `<scratch_dir>/<run>`. It was removed: this cluster does not retain scratch
+> across the job boundary, so the search array (a separate job) could not find the
+> `WorkingDirectory` prepare had created on scratch. Keeping the chain on shared is
+> both correct and simpler — and the resume MSA failures that motivated the scratch
+> experiment were a MAFFT L-INS-i bug, not a filesystem problem (see the resume
+> phase doc).
 
 stdout is captured to `<RUN_NAME>_prepare_full_stdout.log`. This single run **is**
 the probe — it creates `WorkingDirectory/` (with `SpeciesIDs.txt`,
@@ -119,9 +134,10 @@ any line that is not a valid command.
 
 ### 6. Locate and record the WorkingDirectory
 
-The script finds `WorkingDirectory` under `OUTPUT_DIR` and writes its absolute
-path to `<RUN_NAME>_working_dir_path.txt`. The resume job reads this pointer
-directly (a missing pointer means prepare failed).
+The script finds `WorkingDirectory` under `$OF_WORK_ROOT` (`= $OUTPUT_DIR`, on
+shared) and writes its absolute path to `<RUN_NAME>_working_dir_path.txt` on
+shared. The search and resume jobs read this pointer directly (a missing pointer
+means prepare failed).
 
 ### 7. Determine how databases were handled
 
@@ -194,7 +210,7 @@ python -m convgeno.slurm.build_search_manifest \
 `SEARCH_TASKS` (`T`) is fixed when the scripts are generated, so the number of
 manifests written here always matches the search array's width. The load-
 balancing algorithm (the cost model, the `T` value, and how commands are
-assigned to buckets) is documented in [`search-phase.md`](./search-phase.md). If
+assigned to buckets) is documented in [`2-search-phase.md`](./2-search-phase.md). If
 this step fails, the prepare job aborts so the search array is never launched
 against a missing or partial work plan.
 
@@ -216,4 +232,4 @@ complete: no species pair is missing, and no database is absent.
 
 On success, the search array (Job 2) starts under an `afterok` dependency and
 consumes the manifests and databases produced here. See
-[`search-phase.md`](./search-phase.md).
+[`2-search-phase.md`](./2-search-phase.md).

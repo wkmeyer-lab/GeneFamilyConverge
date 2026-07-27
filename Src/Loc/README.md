@@ -2,7 +2,7 @@
 
 This directory contains code specific to **this** pipeline run at Lehigh.
 Scripts here are allowed to reference project paths, config files, and
-the specific chaining of OrthoFinder → CAFE-5 / BadiRate → R analysis.
+the specific chaining of OrthoFinder → CAFE-5 → R analysis.
 
 ## Contents
 

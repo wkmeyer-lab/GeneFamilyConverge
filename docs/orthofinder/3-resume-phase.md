@@ -4,7 +4,7 @@ This document describes **Job 3 of 3** in `convgeno`'s multi-node OrthoFinder
 workflow: how the run is finished on a single fat node once the distributed
 search is complete. It is a factual walkthrough of the workflow and the math, in
 the order things actually happen. For the jobs that come before, see
-[`prepare-phase.md`](./prepare-phase.md) and [`search-phase.md`](./search-phase.md).
+[`1-prepare-phase.md`](./1-prepare-phase.md) and [`2-search-phase.md`](./2-search-phase.md).
 
 ---
 
@@ -26,7 +26,7 @@ flowchart LR
 
 The `afterok` dependency means resume runs **only if the whole search array
 succeeded**. If any search task failed, resume never starts, and the chain halts
-at the broken link (see [`search-phase.md`](./search-phase.md) for how to
+at the broken link (see [`2-search-phase.md`](./2-search-phase.md) for how to
 diagnose and resubmit). Before doing any work, resume independently re-verifies
 that the search set is complete (below), so an incomplete or corrupt search set
 can never flow into the analysis.
@@ -49,10 +49,10 @@ Generated script: `slurm_scripts/orthofinder_resume.sh`
 | `WorkingDirectory/Blast{i}_{j}.txt.gz` | the `n²` search results from Job 2 |
 | `<RUN_NAME>_search_manifests/` | per-task manifests (used to map missing pairs → tasks) |
 
-**Output:** the final OrthoFinder results directory under
-`orthofinder.output_dir` (`Results_*/` with `Orthogroups/`, gene trees, the
-species tree, and orthologue/duplication tables), written **in place on the
-shared filesystem**.
+**Output:** the final OrthoFinder results directory (`Results_*/` with
+`Orthogroups/`, gene trees, the species tree, and orthologue/duplication tables),
+written by `orthofinder -b` under the shared `WorkingDirectory` it runs on (§5) —
+i.e. on the **shared filesystem**, where prepare created the `WorkingDirectory`.
 
 ---
 
@@ -75,9 +75,9 @@ flowchart TD
     P["Read WorkingDirectory pointer"] --> G["Completeness gate:<br/>all n^2 Blast files present?"]
     G -->|no| GX["print missing pairs + resubmit line;<br/>exit WITHOUT -b"]
     G -->|yes| F["fd gate: raise ulimit -n to required_r<br/>(or fail fast if hard cap too low)"]
-    F --> T["Place -p / TMPDIR<br/>(scratch if configured, else shared)"]
-    T --> B["orthofinder -b (with -M/-A/-T = single-node)"]
-    B --> CL["cleanup temp (ephemeral rm / persistent leave);<br/>Results already in place on shared"]
+    F --> T["Set project-local pickle/temp dir (-p / TMPDIR)"]
+    T --> B["orthofinder -b IN PLACE on shared WorkingDirectory<br/>(with -M/-A/-T = single-node)"]
+    B --> CL["results in place under shared WorkingDirectory;<br/>remove temp (preserved on failure)"]
 ```
 
 ### 1. Resource request + environment
@@ -129,16 +129,35 @@ node, before the long search), so an infeasible run is caught early. For this
 project's regime (~114 species), `required_r ≈ 15,300` — comfortably under
 typical HPC hard caps.
 
-### 5. Temp / pickle placement
+### 5. Where `-b` runs (in place on the shared WorkingDirectory)
 
-The bulk data — the `WorkingDirectory` (with the `n²` Blast files, often
-tens–hundreds of GB) and the Results — is read and written **in place on the
-shared filesystem**; it is never staged to node-local disk. Only OrthoFinder's
-small-file temp/pickle churn is optionally routed to scratch: with
-`slurm.scratch_dir` set it resolves scratch (configured → `/tmp/scratch` → a
-shared temp subdir) and points both `-p` (pickle dir) and `TMPDIR` there. A
-SIGTERM/SIGINT salvage trap removes **node-local** temp on interruption; the
-Results, being on shared, persist regardless.
+`-b` runs **in place on the shared `WorkingDirectory`** — the one prepare created
+and the search array wrote the `n²` `Blast{i}_{j}.txt.gz` results back to. Its
+output lands under that directory directly, so there is **no stage-in and no
+copy-back**, and the deliverable is on the shared filesystem however the job ends.
+
+This is deliberately simple, and it corrects an earlier design:
+
+- The `WorkingDirectory` must live on **shared** storage because the chain is
+  three *separate* SLURM jobs on *different* nodes (prepare → search array →
+  resume). A shared filesystem is the only thing guaranteed to be durable and
+  visible across all of them. An earlier "whole-chain-on-scratch" mode put the
+  `WorkingDirectory` on `/share/ceph/scratch`, but that scratch is **not retained
+  across the job boundary** on this cluster: prepare created the
+  `WorkingDirectory` there and the search array — a separate job on other nodes —
+  then failed with `ERROR: WorkingDirectory not found or unreadable`.
+- Running the MSA stage on the shared pool was **not** the cause of the earlier
+  `list index out of range` failures. Those were MAFFT **L-INS-i** emitting empty
+  alignments (§6), which happens regardless of filesystem — OrthoFinder's own fast
+  MAFFT command aligns the same sequences fine on the same shared pool. The MAFFT
+  shim (§6) fixes it at the source, so no fast-scratch workaround is needed.
+  (`sacct` also ruled out memory: both the single-node and multi-node runs used
+  well under their 342 GB request.)
+
+The `-p`/`TMPDIR` pickle dir is a small **project-local** dir
+(`<output_parent>/<run>_tmp`), (re)created immediately before `-b` (OrthoFinder
+aborts at startup if `-p` is missing) and removed on success. The completeness +
+fd gates always run on the pointer's `WorkingDirectory` first.
 
 ### 6. Run `orthofinder -b`
 
@@ -151,13 +170,32 @@ Run under `set +e` / `set -e` so the exit code is captured (not aborted) and the
 cleanup below always runs. `-S` is **not** passed — the search program is already
 fixed in the WorkingDirectory by prepare.
 
-### 7. Cleanup
+**MAFFT MSA shim (immediately before `-b`).** For orthogroups under 500 sequences
+OrthoFinder aligns with MAFFT **L-INS-i** (`--localpair --maxiterate 1000`), which
+on this data stalls and sporadically emits an **empty** alignment; an empty
+alignment for a single-copy orthogroup is fatal (`Species tree inference failed`).
+The fast command (`mafft --anysymbol`, which OrthoFinder itself uses for
+≥ 500-sequence OGs) aligns the same sequences instantly and reliably. So the script
+installs a tiny `mafft` **shim** into a `mktemp -d` dir prepended to `PATH`
+(`runtime.render_mafft_msa_shim`): it forces the fast command for every orthogroup,
+retries up to 3× and requires non-empty output, and passes non-alignment calls
+(the dependency test, `--version`) straight through. This is job-local — no
+`$HOME`/`config.json` edits. After `-b`, a guard fails the job loudly if any
+`Alignments_ids/*.fa` is still empty, so an incomplete species tree is never
+shipped silently. (The single-node script installs the same shim.)
 
-The Results are already in place on shared. On success the temp is removed
-(node-local/ephemeral scratch, or the project temp) **or left** when it is on
-persistent shared scratch (the cluster's purge policy reclaims it — never `rm`'d,
-matching the single-node convention). On failure the temp is preserved for
-debugging. The job exits with OrthoFinder's exit code.
+### 7. Results + cleanup
+
+Because `-b` ran in place on the shared `WorkingDirectory`, the results are
+already on shared no matter how the job ends — there is nothing to copy out.
+
+- **On success:** the final results dir
+  (`<WorkingDirectory>/OrthoFinder/Results_*`) is located and printed, and the
+  project-local temp dir is removed.
+- **On failure:** the temp dir is preserved for debugging, and the message points
+  to the partial results in place under `<WorkingDirectory>/OrthoFinder`.
+
+The job exits with OrthoFinder's exit code.
 
 ---
 
@@ -188,6 +226,6 @@ single-node benchmark a valid comparison.
 ## What runs next
 
 Resume is the final job in the OrthoFinder orchestration; its Results directory
-is the deliverable. Downstream pipeline steps (CAFE-5 / BadiRate turnover
-modeling and the R association analysis) consume those results via files and are
-outside this multi-node orchestration.
+is the deliverable. Downstream pipeline steps (CAFE-5 turnover modeling and the
+R association analysis) consume those results via files and are outside this
+multi-node orchestration.

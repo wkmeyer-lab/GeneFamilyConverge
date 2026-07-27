@@ -959,20 +959,56 @@ class TestResumeScriptTmpdirAndThreads:
         of = script.index('orthofinder -b "$WORK_DIR"')
         assert script.rfind("set +e", 0, of) != -1  # set +e before the command
 
+    def test_resume_creates_pickle_dir_right_before_b(self, config_threads_unset):
+        # If the pool reaps the empty -p dir, OrthoFinder aborts at startup;
+        # ensure the script (re)creates $OF_TMP right before -b so OrthoFinder's
+        # startup existence check on -p passes.
+        script = generate_resume_script(config_threads_unset)
+        mk = script.rfind('mkdir -p "$OF_TMP"')
+        of = script.index('orthofinder -b "$WORK_DIR"')
+        assert mk != -1 and mk < of
 
-class TestResumeScratch:
-    """Resume routes only -p/TMPDIR to scratch; bulk stays on shared."""
+    def test_resume_installs_mafft_shim_before_b(self, config_threads_unset):
+        # The MSA shim (fast --anysymbol + retry) must be installed before -b so
+        # OrthoFinder's mafft calls hit it instead of the L-INS-i default that
+        # stalls / emits empty alignments.
+        script = generate_resume_script(config_threads_unset)
+        assert 'export PATH="$CONVGENO_SHIM_DIR:$PATH"' in script
+        assert '"$REAL" --anysymbol "$INPUT"' in script
+        assert "--localpair" not in script  # L-INS-i never invoked
+        shim = script.index('CONVGENO_SHIM_DIR="$(mktemp -d)"')
+        of = script.index('orthofinder -b "$WORK_DIR"')
+        assert shim < of
 
-    @pytest.fixture()
-    def scratch_config(self, sample_runtime) -> PipelineConfig:
+    def test_resume_guards_against_empty_alignments(self, config_threads_unset):
+        # Loud-failure net: empty alignments after a "successful" -b flip OF_EXIT.
+        script = generate_resume_script(config_threads_unset)
+        assert "empty alignments remain" in script
+        assert "-path '*Alignments_ids*' -name '*.fa' -size 0" in script
+
+
+class TestResumeInPlaceOnShared:
+    """Resume ALWAYS runs -b in place on the shared WorkingDirectory.
+
+    The WorkingDirectory lives on shared (prepare created it there; the search
+    array wrote the n^2 Blast results back to it), which is durable and visible
+    across the SEPARATE prepare/search/resume SLURM jobs. Resume runs -b in place
+    on it with the MAFFT shim -- there is NO scratch staging of the
+    WorkingDirectory in any config, because scratch is not retained across the
+    job chain on this cluster and the MSA failures were caused by MAFFT L-INS-i,
+    not the filesystem.
+    """
+
+    @staticmethod
+    def _cfg(sample_runtime, *, scratch_dir=None, ephemeral=False):
         return PipelineConfig(
             project_dir="/share/ceph/project",
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=48,
                 mem="350400M",
-                scratch_dir="/local/scratch",
-                is_ephemeral_scratch=True,
+                scratch_dir=scratch_dir,
+                is_ephemeral_scratch=ephemeral,
             ),
             orthofinder=OrthoFinderConfig(
                 input_dir="/in",
@@ -983,49 +1019,81 @@ class TestResumeScratch:
             runtime=sample_runtime,
         )
 
-    def test_reuses_resolve_scratch_base(self, scratch_config):
-        script = generate_resume_script(scratch_config)
-        assert "resolve_scratch_base" in script
-        assert 'PREFERRED_SCRATCH="/local/scratch"' in script
-        assert 'FALLBACK_SCRATCH="/tmp/scratch"' in script
+    # Every scratch config -- none, ephemeral node-local, persistent cluster-wide.
+    _SCRATCH_CASES = [
+        (None, False),
+        ("/local/scratch", True),
+        ("/share/ceph/scratch/prm526", False),
+    ]
 
-    def test_routes_pickle_and_tmpdir_to_scratch(self, scratch_config):
-        script = generate_resume_script(scratch_config)
-        assert 'OF_TMP="$SCRATCH_BASE/${SLURM_JOB_ID}_of_tmp"' in script
-        assert 'export TMPDIR="$OF_TMP"' in script
-        assert '-p "$OF_TMP"' in script  # OrthoFinder pickle dir
+    @pytest.mark.parametrize("scratch_dir, ephemeral", _SCRATCH_CASES)
+    def test_no_scratch_machinery_in_any_config(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        # Regardless of scratch config, resume must NOT stage the WorkingDirectory
+        # to scratch: no resolve_scratch_base, no JOB_SCRATCH, no symlink/copy-back
+        # machinery. This is the fix for the prepare->search scratch-handoff
+        # failure (the scratch WorkingDirectory was gone by the time search ran).
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
+        )
+        script = generate_resume_script(cfg)
+        assert "resolve_scratch_base" not in script
+        assert "JOB_SCRATCH" not in script
+        assert "SHARED_WORK_DIR" not in script
+        assert "ln -s -t" not in script
+        assert "salvage_resume" not in script
 
-    def test_bulk_stays_on_shared(self, scratch_config):
-        # -b runs against the shared WorkingDirectory in place; the n^2 Blast
-        # set is never rsynced/copied to scratch.
-        script = generate_resume_script(scratch_config)
+    @pytest.mark.parametrize("scratch_dir, ephemeral", _SCRATCH_CASES)
+    def test_runs_b_in_place_on_pointer_workdir(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
+        )
+        script = generate_resume_script(cfg)
+        assert "Running -b in place on the shared WorkingDirectory" in script
         assert 'orthofinder -b "$WORK_DIR"' in script
-        assert "$WORK_DIR" in script
-        assert "rsync" not in script  # no bulk staging in resume
 
-    def test_salvage_trap_removes_local_temp(self, scratch_config):
-        # scratch_config is ephemeral -> salvage trap removes node-local temp.
-        script = generate_resume_script(scratch_config)
-        assert "salvage_tmp" in script
-        assert "trap salvage_tmp SIGTERM SIGINT" in script
+    def test_temp_dir_is_project_local(self, sample_runtime):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir="/share/ceph/scratch", ephemeral=False
+        )
+        script = generate_resume_script(cfg)
+        assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+        assert 'export TMPDIR="$OF_TMP"' in script
 
-    def test_ephemeral_scratch_is_removed(self, scratch_config):
-        # Ephemeral (node-local) scratch temp IS removed on cleanup.
-        script = generate_resume_script(scratch_config)
+    def test_cleans_temp_and_reports_results_on_success(self, sample_runtime):
+        script = generate_resume_script(self._cfg(sample_runtime))
         assert 'rm -rf "$OF_TMP"' in script
-        assert "Removing node-local temp" in script
+        assert "Final OrthoFinder results:" in script
+        assert "-name 'Results_*'" in script
 
-    def test_persistent_scratch_is_not_removed(self, sample_runtime):
-        # Persistent shared scratch temp must NOT be removed (purge policy
-        # reclaims it) -- mirrors the single-node persistent cleanup.
-        cfg = PipelineConfig(
-            project_dir="/p",
+    def test_preserves_temp_and_points_to_partial_on_failure(self, sample_runtime):
+        script = generate_resume_script(self._cfg(sample_runtime))
+        assert "Preserving temp for debugging" in script
+        assert "Partial results (if any) are in place" in script
+
+
+class TestPrepareOutputTarget:
+    """Prepare's -o target is ALWAYS the shared output_dir (never scratch).
+
+    The WorkingDirectory must live on the shared filesystem so it survives from
+    the prepare job to the separate search-array and resume jobs. An earlier
+    mode put it on scratch; that scratch was not retained across the job chain,
+    so the search array could not find the prepare-created WorkingDirectory.
+    """
+
+    @staticmethod
+    def _cfg(sample_runtime, *, scratch_dir=None, ephemeral=False):
+        return PipelineConfig(
+            project_dir="/share/ceph/project",
             slurm=SlurmConfig(
                 partition="hawkcpu",
                 cpus_per_task=48,
                 mem="350400M",
-                scratch_dir="/share/ceph/scratch",
-                is_ephemeral_scratch=False,
+                scratch_dir=scratch_dir,
+                is_ephemeral_scratch=ephemeral,
             ),
             orthofinder=OrthoFinderConfig(
                 input_dir="/in",
@@ -1035,17 +1103,37 @@ class TestResumeScratch:
             ),
             runtime=sample_runtime,
         )
-        script = generate_resume_script(cfg)
-        assert "resolve_scratch_base" in script  # scratch still used for -p/TMPDIR
-        assert 'rm -rf "$OF_TMP"' not in script  # persistent -> never removed
-        assert "purge policy reclaims it" in script
-        assert "salvage_tmp" not in script  # no interrupt-rm for persistent
 
-    def test_no_scratch_config_has_no_machinery(self, sample_config):
-        # sample_config has scratch_dir=None.
-        script = generate_resume_script(sample_config)
+    @pytest.mark.parametrize(
+        "scratch_dir, ephemeral",
+        [
+            (None, False),
+            ("/local/scratch", True),
+            ("/share/ceph/scratch/prm526", False),
+        ],
+    )
+    def test_o_targets_shared_output_dir(
+        self, sample_runtime, scratch_dir, ephemeral
+    ):
+        cfg = self._cfg(
+            sample_runtime, scratch_dir=scratch_dir, ephemeral=ephemeral
+        )
+        script = generate_prepare_script(cfg)
+        assert 'OF_WORK_ROOT="$OUTPUT_DIR"' in script
+        assert 'orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op' in script
+        # The WorkingDirectory never goes on scratch in prepare anymore.
         assert "resolve_scratch_base" not in script
-        assert 'OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"' in script
+        assert 'OF_WORK_ROOT="$SCRATCH_BASE' not in script
+
+    def test_pointer_and_manifests_on_shared_parent(self, sample_runtime):
+        cfg = self._cfg(sample_runtime, scratch_dir="/share/ceph/scratch/prm526")
+        script = generate_prepare_script(cfg)
+        # pointer + manifests derive from the shared $OUTPUT_PARENT.
+        assert (
+            'WORK_DIR_FILE="$OUTPUT_PARENT/${RUN_NAME}_working_dir_path.txt"'
+            in script
+        )
+        assert 'MANIFEST_DIR="$OUTPUT_PARENT/${RUN_NAME}' in script
 
 
 class TestLptPartition:
@@ -1345,13 +1433,13 @@ class TestDeriveSearchCpus:
 
 
 class TestDeriveSearchConcurrency:
-    """W = the array %W throttle: default 8, override wins, QOS MaxJobs caps."""
+    """W = the array %W throttle: default 12, override wins, QOS MaxJobs caps."""
 
-    def test_default_is_eight(self):
-        assert derive_search_concurrency() == 8
+    def test_default_is_twelve(self):
+        assert derive_search_concurrency() == 12
 
     def test_override_wins(self):
-        assert derive_search_concurrency(override=12) == 12
+        assert derive_search_concurrency(override=20) == 20
 
     def test_override_below_one_raises(self):
         with pytest.raises(ValueError, match="array_throttle override"):
@@ -1361,7 +1449,7 @@ class TestDeriveSearchConcurrency:
         assert derive_search_concurrency(qos_max_jobs=3) == 3
 
     def test_qos_above_default_has_no_effect(self):
-        assert derive_search_concurrency(qos_max_jobs=100) == 8
+        assert derive_search_concurrency(qos_max_jobs=100) == 12
 
     def test_qos_caps_the_override(self):
         assert derive_search_concurrency(override=20, qos_max_jobs=5) == 5
@@ -1370,10 +1458,10 @@ class TestDeriveSearchConcurrency:
         assert derive_search_concurrency(override=20, qos_max_jobs=1) == 1
 
     def test_qos_zero_means_unlimited(self):
-        assert derive_search_concurrency(qos_max_jobs=0) == 8
+        assert derive_search_concurrency(qos_max_jobs=0) == 12
 
     def test_qos_negative_ignored(self):
-        assert derive_search_concurrency(qos_max_jobs=-5) == 8
+        assert derive_search_concurrency(qos_max_jobs=-5) == 12
 
 
 class TestResolveSearchConcurrency:
@@ -1391,7 +1479,7 @@ class TestResolveSearchConcurrency:
             "convgeno.slurm.multinode_generator.detect_qos_max_jobs",
             lambda partition: None,
         )
-        assert resolve_search_concurrency("hawkcpu") == 8
+        assert resolve_search_concurrency("hawkcpu") == 12
 
     def test_override_still_capped_by_qos(self, monkeypatch):
         monkeypatch.setattr(
@@ -1681,9 +1769,9 @@ class TestComputeSearchArraySizing:
             fallback_mem="16000M",
         )
         assert sizing.cpus == 14  # min(52//3, 15-1)
-        assert sizing.concurrency == 8
+        assert sizing.concurrency == 12
         assert sizing.waves == 4
-        assert sizing.tasks == 32  # K*W, well under n^2=12996 and MaxArraySize
+        assert sizing.tasks == 48  # K*W, well under n^2=12996 and MaxArraySize
         assert sizing.within_task_parallel == 14  # C/p, p=1
         assert sizing.mem.endswith("M")
 
@@ -1711,8 +1799,8 @@ class TestComputeSearchArraySizing:
             fallback_mem="16000M",
         )
         assert sizing.cpus == 1
-        assert sizing.concurrency == 8
-        assert sizing.tasks == 32  # K*W (no n^2 cap available)
+        assert sizing.concurrency == 12
+        assert sizing.tasks == 48  # K*W (no n^2 cap available)
         assert sizing.time_limit == "72:00:00"  # fallback
         assert sizing.mem == "16000M"  # fallback
 

@@ -31,7 +31,11 @@ from convgeno.slurm.discovery import (
     detect_node_cpus,
     detect_qos_max_jobs,
 )
-from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
+from convgeno.slurm.runtime import (
+    CondaRuntimeConfig,
+    render_conda_bootstrap,
+    render_mafft_msa_shim,
+)
 
 # POSIX ERE alternation matching a real OrthoFinder search command.
 #
@@ -260,6 +264,22 @@ def generate_prepare_script(
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
 
+    # OrthoFinder's -o target is ALWAYS the shared output_dir. The
+    # WorkingDirectory (databases + Species*.fa), the n^2 Blast results the
+    # search array writes back to it, and the final Results all live on the
+    # shared filesystem -- which is durable and visible to every node across the
+    # prepare -> search -> resume job chain. The pointer + manifests likewise
+    # live on the shared $OUTPUT_PARENT.
+    #
+    # (An earlier "whole-chain-on-scratch" mode put the WorkingDirectory on
+    # /share/ceph/scratch, but that scratch is NOT retained across separate SLURM
+    # jobs on this cluster: prepare created the WorkingDirectory there, and the
+    # search array -- a separate job on other nodes -- then could not find it.
+    # Moving the chain onto scratch was also solving the wrong problem: the resume
+    # MSA failures were caused by MAFFT L-INS-i, not the filesystem, and are fixed
+    # at the source by the shim installed in the resume script.)
+    work_root_block = 'OF_WORK_ROOT="$OUTPUT_DIR"'
+
     script = f"""\
 #!/bin/bash
 # ============================================================
@@ -302,6 +322,8 @@ if [ -e "$OUTPUT_DIR" ]; then
     exit 1
 fi
 
+{work_root_block}
+
 PREPARE_LOG="$OUTPUT_PARENT/${{RUN_NAME}}_prepare_full_stdout.log"
 COMMANDS_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_diamond_commands.txt"
 WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
@@ -309,7 +331,7 @@ WORK_DIR_FILE="$OUTPUT_PARENT/${{RUN_NAME}}_working_dir_path.txt"
 # Run OrthoFinder prepare phase. -op stops after writing the search
 # commands and exits without running them. stdout is redirected to a
 # log file in $OUTPUT_PARENT (which already exists), NOT in $OUTPUT_DIR.
-orthofinder -f "$INPUT_DIR" -o "$OUTPUT_DIR" -op -S "$SEARCH_PROGRAM" > "$PREPARE_LOG" 2>&1
+orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op -S "$SEARCH_PROGRAM" > "$PREPARE_LOG" 2>&1
 
 PREPARE_EXIT=$?
 if [ $PREPARE_EXIT -ne 0 ]; then
@@ -353,10 +375,10 @@ echo "Extracted $NUM_COMMANDS search commands to $COMMANDS_FILE"
 
 # Locate the WorkingDirectory OrthoFinder created and persist its path
 # for the resume script.
-WORK_DIR=$(find "$OUTPUT_DIR" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
+WORK_DIR=$(find "$OF_WORK_ROOT" -maxdepth 2 -name "WorkingDirectory" -type d | head -1)
 
 if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
-    echo "ERROR: Could not find OrthoFinder WorkingDirectory under $OUTPUT_DIR"
+    echo "ERROR: Could not find OrthoFinder WorkingDirectory under $OF_WORK_ROOT"
     echo "Check prepare log: $PREPARE_LOG"
     exit 1
 fi
@@ -939,7 +961,7 @@ def derive_search_cpus_from_discovery(
     )
 
 
-_SEARCH_CONCURRENCY_DEFAULT = 8  # W: polite default max concurrent array tasks
+_SEARCH_CONCURRENCY_DEFAULT = 12  # W: polite default max concurrent array tasks
 
 
 def derive_search_concurrency(
@@ -949,7 +971,7 @@ def derive_search_concurrency(
     """Max concurrent search-array tasks (W) -- the array ``%W`` throttle.
 
     W is the SPEED lever: total search time ~= total_cost / (W * C). It is a
-    polite *intent* cap, never tuned from a prior run -- the config default (8)
+    polite *intent* cap, never tuned from a prior run -- the config default (12)
     or a positive ``override`` (from ``MultinodeConfig.array_throttle``). When a
     QOS ``MaxJobs`` limit is supplied it caps W (values < 1 mean "no limit" and
     are ignored); SLURM enforces QOS at runtime regardless. The further cap
@@ -1587,9 +1609,15 @@ def generate_resume_script(
 
     The generated script:
 
-    * Sets ``TMPDIR`` to a project-local temp directory to avoid filling
-      ``/dev/shm`` or ``/tmp``.
-    * Cleans up ``$TMPDIR`` on success, preserves it on failure.
+    * Runs the completeness + fd gates on the pointer's WorkingDirectory.
+    * Runs ``-b`` **in place on the shared WorkingDirectory** (where prepare
+      created it and the search array wrote the ``n^2`` Blast results). Results
+      land under it directly, so there is no stage-in and no copy-back, and the
+      deliverable is on the shared filesystem however the job ends. The MSA
+      failures this pipeline hit were caused by MAFFT L-INS-i (empty alignments),
+      not the filesystem, and are fixed at the source by the MAFFT shim installed
+      immediately before ``-b`` (plus a post-run empty-alignment guard). The
+      pickle/temp dir (``-p``) is a small project-local dir removed on success.
     * Uses ``orthofinder.analysis_threads`` for ``-a`` (falling back to 1
       when unset).
 
@@ -1612,6 +1640,9 @@ def generate_resume_script(
         },
     )
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
+    # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
+    # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
+    mafft_shim = render_mafft_msa_shim()
 
     # Resolve analysis threads (-a): use the configured value, falling back
     # to 1 when unset. The open-file-limit-driven auto-heuristic was removed;
@@ -1640,78 +1671,39 @@ def generate_resume_script(
         method_args = ""
     method_display = method_args.strip() or "(OrthoFinder default: dendroblast)"
 
-    # Temp/pickle placement. The bulk (WorkingDirectory + Results) is read and
-    # written IN PLACE on the shared filesystem; only OrthoFinder's small-file
-    # temp/pickle churn (-p + TMPDIR) is optionally routed to scratch. The n^2
-    # Blast set is never copied to node-local. Reuses the single-node scratch
-    # machinery INCLUDING its cleanup rule: node-local (ephemeral) scratch is
-    # removed; persistent shared scratch is LEFT for the cluster's purge policy.
-    scratch_dir = config.slurm.scratch_dir
-    if scratch_dir is None:
-        # No scratch: OrthoFinder temp on a project-local dir (shared); this is
-        # the project's own space (no purge policy), so remove it on success.
-        tmp_trap_block = ""
-        tmp_cleanup_success = (
-            'echo "Removing temp: $OF_TMP"\n    rm -rf "$OF_TMP" || true'
-        )
-        tmp_cleanup_failure = 'echo "Preserving temp for debugging: $OF_TMP"'
-        resume_tmp_block = """\
-# ---- Temp/pickle location (shared; no scratch_dir configured) ----
+    # The WorkingDirectory lives on the shared filesystem (prepare created it
+    # there; the search array wrote the n^2 Blast results back to it). Resume runs
+    # -b IN PLACE on that shared WorkingDirectory: results land under it directly,
+    # so there is nothing to stage in or copy back, and the deliverable is already
+    # on shared no matter how the job ends. The failure-prone part of the MSA stage
+    # was never the filesystem -- it was MAFFT L-INS-i stalling / emitting empty
+    # alignments -- which the shim installed just before -b fixes at the source.
+    # The pickle/temp dir (-p) is a small project-local dir removed on success.
+    # (An earlier design staged the WorkingDirectory onto /share/ceph/scratch; that
+    # scratch is not retained across the separate prepare/search/resume SLURM jobs
+    # on this cluster, so the WorkingDirectory vanished at the prepare->search
+    # handoff. Keeping it on shared is both correct and simpler.)
+    stage_block = """\
+# ---- Resume runs -b in place on the shared WorkingDirectory ----
 OF_TMP="$OUTPUT_PARENT/${RUN_NAME}_tmp"
 export TMPDIR="$OF_TMP"
-mkdir -p "$TMPDIR"
-echo "OrthoFinder temp/pickle: $OF_TMP\""""
-    else:
-        if config.slurm.is_ephemeral_scratch:
-            # Node-local (ephemeral) scratch -> safe to remove (the node
-            # reclaims it anyway); salvage trap removes it on interruption too.
-            tmp_trap_block = """\
-    salvage_tmp() {
-        trap - SIGTERM SIGINT
-        echo "Interrupted -- removing node-local temp (Results remain on shared)..."
-        rm -rf "$OF_TMP" 2>/dev/null || true
-    }
-    trap salvage_tmp SIGTERM SIGINT
+mkdir -p "$OF_TMP"
+echo "Running -b in place on the shared WorkingDirectory. Temp: $OF_TMP\""""
+    # `|| true` so a non-zero find (e.g. transient) can never turn a successful
+    # OrthoFinder run into a job failure at the reporting step (set -e + pipefail).
+    finish_success_block = """\
+FINAL_RESULTS="$(find "$WORK_DIR/OrthoFinder" -maxdepth 1 -name 'Results_*' -type d \\
+    2>/dev/null | sort | tail -1)" || true
+echo "Removing temp: $OF_TMP"
+rm -rf "$OF_TMP" || true
+if [ -n "$FINAL_RESULTS" ]; then
+    echo "Final OrthoFinder results: $FINAL_RESULTS"
+fi\
 """
-            tmp_cleanup_success = (
-                'echo "Removing node-local temp: $OF_TMP"\n'
-                '    rm -rf "$OF_TMP" || true'
-            )
-            tmp_cleanup_failure = (
-                'echo "Node-local temp ($OF_TMP) is reclaimed when the node is'
-                ' released."'
-            )
-        else:
-            # Persistent shared scratch -> DO NOT remove; the cluster purge
-            # policy reclaims it (mirrors the single-node persistent cleanup).
-            # No salvage trap: never rm persistent scratch, even on interruption.
-            tmp_trap_block = ""
-            tmp_cleanup_success = (
-                'echo "Persistent scratch temp left in $OF_TMP (cluster purge'
-                ' policy reclaims it; not removed)."'
-            )
-            tmp_cleanup_failure = (
-                'echo "Persistent scratch temp left in $OF_TMP for debugging."'
-            )
-        resume_tmp_block = f"""\
-# ---- Temp/pickle location (bulk stays shared; churn to scratch) ----
-SHARED_TMP="$OUTPUT_PARENT/${{RUN_NAME}}_tmp"
-PREFERRED_SCRATCH="{scratch_dir}"
-FALLBACK_SCRATCH="/tmp/scratch"
-{_RESOLVE_SCRATCH_FUNC}
-SCRATCH_BASE="$(resolve_scratch_base "$PREFERRED_SCRATCH")"
-if [ -z "$SCRATCH_BASE" ]; then
-    SCRATCH_BASE="$(resolve_scratch_base "$FALLBACK_SCRATCH")"
-fi
-if [ -n "$SCRATCH_BASE" ]; then
-    OF_TMP="$SCRATCH_BASE/${{SLURM_JOB_ID}}_of_tmp"
-    echo "OrthoFinder temp/pickle -> scratch: $OF_TMP (base $SCRATCH_BASE)"
-{tmp_trap_block}else
-    OF_TMP="$SHARED_TMP"
-    echo "No writable scratch; OrthoFinder temp/pickle on shared: $OF_TMP"
-fi
-export TMPDIR="$OF_TMP"
-mkdir -p "$TMPDIR\""""
+    finish_failure_block = """\
+echo "Preserving temp for debugging: $OF_TMP"
+echo "Partial results (if any) are in place under: $WORK_DIR/OrthoFinder"\
+"""
 
     script = f"""\
 #!/bin/bash
@@ -1801,7 +1793,7 @@ else
     exit 1
 fi
 
-{resume_tmp_block}
+{stage_block}
 
 TOTAL_THREADS={config.orthofinder.search_threads}
 ANALYSIS_THREADS={analysis_threads}
@@ -1813,12 +1805,31 @@ echo "Gene-tree method:    {method_display}"
 echo "Pickle/temp dir (-p): $OF_TMP"
 echo ""
 
+# (Re)create the pickle/temp dir right before launching OrthoFinder in case
+# anything reaped it: OrthoFinder aborts at startup if -p does not exist.
+mkdir -p "$OF_TMP"
+
+{mafft_shim}
+
 # Run under 'set +e' so a non-zero exit is captured (not aborted by set -e),
 # letting the cleanup below run and the exit code propagate.
 set +e
 orthofinder -b "$WORK_DIR" -t "$TOTAL_THREADS" -a "$ANALYSIS_THREADS" -p "$OF_TMP"{method_args}{extra_suffix}
 OF_EXIT=$?
 set -e
+
+# Safety net: the MSA shim retries every alignment, but if any orthogroup
+# alignment is STILL empty (a genuinely unrecoverable OG), fail loudly rather
+# than ship an incomplete/absent species tree.
+if [ "$OF_EXIT" -eq 0 ]; then
+    EMPTY_ALN="$(find "$WORK_DIR" -path '*Alignments_ids*' -name '*.fa' -size 0 \\
+        2>/dev/null | head -20)"
+    if [ -n "$EMPTY_ALN" ]; then
+        echo "ERROR: OrthoFinder reported success but empty alignments remain:" >&2
+        echo "$EMPTY_ALN" >&2
+        OF_EXIT=1
+    fi
+fi
 
 ELAPSED=$(( SECONDS - START_SECONDS ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -1835,18 +1846,12 @@ echo "============================================================"
 
 if [ "$OF_EXIT" -eq 0 ]; then
     echo "OrthoFinder completed successfully."
-    {tmp_cleanup_success}
-
-    if [ ! -f "$OUTPUT_DIR"/*/Orthogroups/Orthogroups.tsv ] 2>/dev/null; then
-        echo "WARNING: Expected output file Orthogroups.tsv not found in $OUTPUT_DIR"
-        echo "Check $OUTPUT_DIR for a Results_* directory."
-    fi
-
+{finish_success_block}
     echo "OrthoFinder multi-node run completed successfully."
-    echo "Results are in place on the shared output directory: $OUTPUT_DIR"
+    echo "Results available under the shared output directory: $OUTPUT_DIR"
 else
     echo "OrthoFinder exited with code $OF_EXIT."
-    {tmp_cleanup_failure}
+{finish_failure_block}
 fi
 
 exit "$OF_EXIT"

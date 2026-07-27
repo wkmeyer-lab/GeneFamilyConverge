@@ -9,7 +9,7 @@
 # run_pipeline.sbatch — Orchestrate the full pipeline on Lehigh SLURM.
 #
 # This lightweight job runs the fast Python steps directly and submits
-# the heavy tools (OrthoFinder, CAFE-5, BadiRate) as separate jobs
+# the heavy tools (OrthoFinder, CAFE-5) as separate jobs
 # with --dependency so they run in order.
 #
 # Usage:
@@ -30,6 +30,8 @@ echo "=== Preparing proteomes ==="
 python Src/Loc/scripts/prepare_proteomes.py --config "$CONFIG"
 
 echo "=== Submitting OrthoFinder ==="
+# The OrthoFinder job also makes the species tree ultrametric (r8s) and
+# prepares the CAFE-5 inputs once OrthoFinder finishes (see submit_orthofinder.sbatch).
 JOB_OF=$(sbatch --parsable Src/Loc/workflows/submit_orthofinder.sbatch)
 echo "OrthoFinder job: $JOB_OF"
 
@@ -37,10 +39,6 @@ echo "=== Submitting CAFE-5 (after OrthoFinder) ==="
 JOB_CAFE=$(sbatch --parsable --dependency=afterok:${JOB_OF} Src/Loc/workflows/submit_cafe.sbatch)
 echo "CAFE-5 job: $JOB_CAFE"
 
-echo "=== Submitting BadiRate (after OrthoFinder) ==="
-JOB_BR=$(sbatch --parsable --dependency=afterok:${JOB_OF} Src/Loc/workflows/submit_badirate.sbatch)
-echo "BadiRate job: $JOB_BR"
-
-echo "=== Pipeline submitted. CAFE-5 and BadiRate run in parallel after OrthoFinder. ==="
-echo "After both complete, run the R summarization step manually:"
+echo "=== Pipeline submitted. CAFE-5 runs after OrthoFinder. ==="
+echo "After it completes, run the R summarization step manually:"
 echo "  Rscript Src/Loc/scripts/summarize_results.R --config $CONFIG"

@@ -6,18 +6,20 @@
 orthofinder:
   command: orthofinder
 
+# r8s makes the species tree ultrametric. It is NOT on conda/bioconda:
+# build it from source with tools/r8s/install_r8s.sh (see tools/r8s/README.md),
+# then either put it on PATH or set the absolute `command` here /
+# in tool_paths.local.yaml.
+r8s:
+  command: r8s
+
 cafe:
   command: cafe5
-
-badirate:
-  command: BadiRate.pl
-  # BadiRate is a Perl script. Adjust path after installation.
-  # Example HPC path: /share/apps/badirate/1.35/BadiRate.pl
 
 # --- HPC example (uncomment and adjust) ---
 # orthofinder:
 #   command: /share/apps/orthofinder/2.5.5/orthofinder
+# r8s:
+#   command: /share/apps/r8s/1.81/r8s
 # cafe:
 #   command: /share/apps/cafe5/5.1.0/bin/cafe5
-# badirate:
-#   command: /share/apps/badirate/1.35/BadiRate.pl

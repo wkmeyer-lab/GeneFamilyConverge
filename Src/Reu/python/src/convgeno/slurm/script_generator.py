@@ -6,7 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.slurm.config import PipelineConfig
-from convgeno.slurm.runtime import CondaRuntimeConfig, render_conda_bootstrap
+from convgeno.slurm.runtime import (
+    CondaRuntimeConfig,
+    render_conda_bootstrap,
+    render_mafft_msa_shim,
+)
 
 
 def _orthofinder_command_block(config: PipelineConfig) -> str:
@@ -206,6 +210,9 @@ echo "This is persistent scratch and will be removed by the cluster's purge poli
 
     sbatch_block = "\n".join(sbatch_lines)
     bootstrap_block = render_conda_bootstrap(resolved_runtime)
+    # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
+    # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
+    mafft_shim = render_mafft_msa_shim()
 
     script = f"""\
 #!/bin/bash
@@ -290,6 +297,8 @@ cat <<'CONVGENO_ORTHOFINDER_COMMAND'
 {of_command}
 CONVGENO_ORTHOFINDER_COMMAND
 echo ""
+
+{mafft_shim}
 
 set +e
 {of_command}

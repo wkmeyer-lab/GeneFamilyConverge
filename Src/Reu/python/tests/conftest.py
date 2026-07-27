@@ -67,6 +67,7 @@ MASEQKLISEEDLMORE
 #  Fixtures: plain-text FASTA files
 # ===================================================================
 
+
 @pytest.fixture()
 def ensembl_fasta_file(tmp_path: Path) -> Path:
     """Write an Ensembl-format FASTA file and return its path."""
@@ -101,6 +102,7 @@ def duplicate_fasta_file(tmp_path: Path) -> Path:
 #  Fixtures: compressed FASTA files
 # ===================================================================
 
+
 @pytest.fixture()
 def gzip_fasta_file(tmp_path: Path) -> Path:
     """Write a gzip-compressed Ensembl FASTA and return its path."""
@@ -122,6 +124,7 @@ def bz2_fasta_file(tmp_path: Path) -> Path:
 # ===================================================================
 #  Fixtures: directories of FASTA files
 # ===================================================================
+
 
 @pytest.fixture()
 def fasta_dir(tmp_path: Path) -> Path:
@@ -173,3 +176,94 @@ def split_proteome_files(tmp_path: Path) -> list[Path]:
     f1.write_text(ENSEMBL_SPLIT_CHR1, encoding="utf-8")
     f2.write_text(ENSEMBL_SPLIT_CHR2, encoding="utf-8")
     return [f1, f2]
+
+
+# ===================================================================
+#  Fixtures: species tree + alignment (for r8s / tree tests)
+# ===================================================================
+
+# A rooted species tree with FastTree-style internal support values
+# (0.98, 1.0) that r8s cannot parse and must be stripped.
+SPECIES_TREE_NEWICK = "((human:0.10,cat:0.12)0.98:0.05,dog:0.20)1.0:0.0;\n"
+
+# Concatenated species-tree alignment: 3 records, each 12 columns wide
+# (gaps included).  Its column count (12) is the value of ``nsites``.
+SPECIES_TREE_ALIGNMENT = (
+    ">human\nMKT-GAC--DEF\n>cat\nMKTAGAC--DEF\n>dog\nMKT-GACAADEF\n"
+)
+
+
+@pytest.fixture()
+def species_tree_file(tmp_path: Path) -> Path:
+    """Write a rooted species tree (with support values) and return its path."""
+    p = tmp_path / "SpeciesTree_rooted.txt"
+    p.write_text(SPECIES_TREE_NEWICK, encoding="utf-8")
+    return p
+
+
+@pytest.fixture()
+def species_tree_alignment_file(tmp_path: Path) -> Path:
+    """Write a 12-column concatenated alignment and return its path."""
+    p = tmp_path / "SpeciesTreeAlignment.fa"
+    p.write_text(SPECIES_TREE_ALIGNMENT, encoding="utf-8")
+    return p
+
+
+@pytest.fixture()
+def orthofinder_output_dir(tmp_path: Path) -> Path:
+    """Build a minimal OrthoFinder (MSA-mode) output tree and return its root.
+
+    Layout::
+
+        orthofinder_out/
+          Results_test/
+            Species_Tree/SpeciesTree_rooted.txt
+            MultipleSequenceAlignments/SpeciesTreeAlignment.fa
+    """
+    root = tmp_path / "orthofinder_out"
+    results = root / "Results_test"
+    st_dir = results / "Species_Tree"
+    st_dir.mkdir(parents=True)
+    (st_dir / "SpeciesTree_rooted.txt").write_text(
+        SPECIES_TREE_NEWICK, encoding="utf-8"
+    )
+    msa_dir = results / "MultipleSequenceAlignments"
+    msa_dir.mkdir(parents=True)
+    (msa_dir / "SpeciesTreeAlignment.fa").write_text(
+        SPECIES_TREE_ALIGNMENT, encoding="utf-8"
+    )
+    og_dir = results / "Orthogroups"
+    og_dir.mkdir(parents=True)
+    (og_dir / "Orthogroups_GeneCount.tsv").write_text(
+        GENE_COUNT_TSV, encoding="utf-8"
+    )
+    return root
+
+
+# A dated/ultrametric tree: every root-to-tip path sums to 94.
+ULTRAMETRIC_TREE_NEWICK = "((human:47,cat:47):47,dog:94);\n"
+
+# OrthoFinder Orthogroups_GeneCount.tsv: species human/cat/dog + trailing Total.
+# OG0000002 is a "large" family (>=100 in human) for size-filter tests.
+GENE_COUNT_TSV = (
+    "Orthogroup\thuman\tcat\tdog\tTotal\n"
+    "OG0000000\t3\t2\t1\t6\n"
+    "OG0000001\t0\t1\t2\t3\n"
+    "OG0000002\t150\t1\t1\t152\n"
+)
+
+
+@pytest.fixture()
+def ultrametric_tree_file(tmp_path: Path) -> Path:
+    """Write a dated ultrametric tree and return its path."""
+    p = tmp_path / "species_tree_ultrametric.nwk"
+    p.write_text(ULTRAMETRIC_TREE_NEWICK, encoding="utf-8")
+    return p
+
+
+@pytest.fixture()
+def gene_count_file(tmp_path: Path) -> Path:
+    """Write an OrthoFinder-style gene count table and return its path."""
+    p = tmp_path / "Orthogroups_GeneCount.tsv"
+    p.write_text(GENE_COUNT_TSV, encoding="utf-8")
+    return p

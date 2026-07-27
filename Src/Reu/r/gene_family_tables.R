@@ -4,8 +4,8 @@
 #
 # Functions to implement:
 #
-#   merge_family_results(orthofinder_counts, cafe_pvalues, badirate_results)
-#     Join results from all three tools into a single summary table
+#   merge_family_results(orthofinder_counts, cafe_pvalues)
+#     Join OrthoFinder and CAFE-5 results into a single summary table
 #     keyed by orthogroup/family ID.
 #
 #   add_phenotype_column(family_table, phenotype_table)

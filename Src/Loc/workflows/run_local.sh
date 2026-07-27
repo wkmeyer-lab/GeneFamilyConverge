@@ -21,17 +21,14 @@ python Src/Loc/scripts/prepare_proteomes.py --config "$CONFIG"
 echo "=== Running OrthoFinder ==="
 python Src/Loc/scripts/run_orthofinder.py --config "$CONFIG" --tools "$TOOLS"
 
+echo "=== Making species tree ultrametric (r8s) ==="
+python Src/Loc/scripts/make_tree_ultrametric.py --config "$CONFIG" --tools "$TOOLS"
+
 echo "=== Preparing CAFE-5 inputs ==="
 python Src/Loc/scripts/prepare_cafe_inputs.py --config "$CONFIG"
 
 echo "=== Running CAFE-5 ==="
 python Src/Loc/scripts/run_cafe.py --config "$CONFIG" --tools "$TOOLS"
-
-echo "=== Preparing BadiRate inputs ==="
-python Src/Loc/scripts/prepare_badirate_inputs.py --config "$CONFIG"
-
-echo "=== Running BadiRate ==="
-python Src/Loc/scripts/run_badirate.py --config "$CONFIG" --tools "$TOOLS"
 
 echo "=== Summarizing results (R) ==="
 Rscript Src/Loc/scripts/summarize_results.R --config "$CONFIG"

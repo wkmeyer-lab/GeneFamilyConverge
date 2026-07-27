@@ -147,6 +147,17 @@ class TestGenerateOrthoFinderScript:
 
         assert set_plus_index < command_index < exit_code_index < set_minus_index
 
+    def test_installs_mafft_shim_before_command(
+        self, sample_config: PipelineConfig
+    ):
+        # Force fast --anysymbol + retry, installed before OrthoFinder runs.
+        script = generate_orthofinder_script(sample_config)
+        assert 'export PATH="$CONVGENO_SHIM_DIR:$PATH"' in script
+        assert '"$REAL" --anysymbol "$INPUT"' in script
+        shim_index = script.index('CONVGENO_SHIM_DIR="$(mktemp -d)"')
+        set_plus_index = script.index("set +e")
+        assert shim_index < set_plus_index
+
     def test_failure_handler_exits_with_orthofinder_status(
         self, sample_config: PipelineConfig
     ):

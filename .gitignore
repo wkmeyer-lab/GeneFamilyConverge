@@ -90,6 +90,7 @@ Data/raw/*
 
 Data/interim/**/*
 !Data/interim/**/.gitkeep
+.phenotype_tree_construction_module 
 
 # --- HPC / batch jobs ---
 slurm-*.out
@@ -103,3 +104,10 @@ slurm-*.err
 *.local.yaml
 *.local.yml
 tool_paths.local.yaml
+
+# --- r8s source/build artifacts ---
+# The r8s binary lives in ~/.local/bin (see tools/r8s/); the downloaded source
+# tarball and unpacked tree should never be committed. tools/r8s/install_r8s.sh
+# builds under ~/software by default, but guard against in-repo builds too.
+/r8s[0-9]*/
+/r8s*.tar.gz

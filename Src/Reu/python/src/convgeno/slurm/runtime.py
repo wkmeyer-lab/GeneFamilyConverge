@@ -27,9 +27,65 @@ __all__ = [
     "CondaRuntimeConfig",
     "detect_conda_runtime",
     "render_conda_bootstrap",
+    "render_mafft_msa_shim",
     "runtime_config_to_dict",
     "runtime_config_from_dict",
 ]
+
+
+def render_mafft_msa_shim() -> str:
+    """Shell block that shadows ``mafft`` on PATH with a fast, retrying shim.
+
+    Root cause it addresses: OrthoFinder's default MSA command for orthogroups
+    with < 500 sequences is MAFFT **L-INS-i** (``mafft --localpair --maxiterate
+    1000 --anysymbol``), which is pathologically slow on moderately large gene
+    families and, under the multi-node resume, sporadically produces an **empty**
+    alignment. An empty alignment for a single-copy orthogroup is fatal
+    ("Species tree inference failed"). The fast command (``mafft --anysymbol``,
+    which OrthoFinder itself already uses for >= 500-sequence OGs) aligns the same
+    sequences instantly and reliably.
+
+    This shim forces the fast command for **every** orthogroup, with up to 3
+    retries and a non-empty-output check, so a stray failure can never leave an
+    empty alignment. Non-alignment invocations (the startup dependency test,
+    ``--version``) pass straight through to the real mafft.
+
+    It is installed into a fresh ``mktemp -d`` directory prepended to ``PATH`` --
+    job-local, no ``$HOME``/config global state, and no edits to OrthoFinder's
+    ``config.json``. Emit it AFTER the conda bootstrap (so the real ``mafft`` is
+    resolvable) and BEFORE invoking ``orthofinder``.
+    """
+    return '''\
+# ---- convgeno MAFFT MSA shim: fast --anysymbol + retry (no L-INS-i) ----
+CONVGENO_REAL_MAFFT="$(command -v mafft)"
+export CONVGENO_REAL_MAFFT
+CONVGENO_SHIM_DIR="$(mktemp -d)"
+cat > "$CONVGENO_SHIM_DIR/mafft" <<'CONVGENO_MAFFT_SHIM'
+#!/bin/bash
+# convgeno MAFFT MSA shim (auto-generated; see runtime.render_mafft_msa_shim).
+set -u
+REAL="${CONVGENO_REAL_MAFFT:-mafft}"
+INPUT="${@: -1}"
+# Non-alignment call (dependency test / --version / no input file): pass through.
+if [ "$#" -eq 0 ] || [ ! -f "$INPUT" ]; then
+    exec "$REAL" "$@"
+fi
+# Alignment call: force the fast command, retry, require non-empty output.
+tmp="$(mktemp)"
+for _attempt in 1 2 3; do
+    if "$REAL" --anysymbol "$INPUT" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        cat "$tmp"
+        rm -f "$tmp"
+        exit 0
+    fi
+done
+rm -f "$tmp"
+echo "convgeno mafft shim: alignment failed for $INPUT after 3 attempts" >&2
+exit 1
+CONVGENO_MAFFT_SHIM
+chmod +x "$CONVGENO_SHIM_DIR/mafft"
+export PATH="$CONVGENO_SHIM_DIR:$PATH"
+echo "MAFFT shim active (fast --anysymbol + retry); real: $CONVGENO_REAL_MAFFT"'''
 
 
 @dataclass(frozen=True)

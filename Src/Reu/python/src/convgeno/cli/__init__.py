@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def _resolve_orthofinder_mode(
@@ -24,6 +25,24 @@ def _resolve_orthofinder_mode(
             "--mode / --multinode / --single-node."
         )
     return "single-node" if wants_single else "multinode"
+
+
+def _resolve_config_path(explicit: str | None, mode: str) -> str:
+    """Config path to use: explicit ``--config`` else the mode-specific default.
+
+    ``multinode`` -> ``pipeline_config_multinode.yaml``; ``single-node`` ->
+    ``pipeline_config_singlenode.yaml`` (both written by ``convgeno init``).
+    Falls back to the legacy ``pipeline_config.yaml`` when the mode-specific
+    file is absent.
+    """
+    if explicit is not None:
+        return explicit
+    mode_default = (
+        "pipeline_config_singlenode.yaml"
+        if mode == "single-node"
+        else "pipeline_config_multinode.yaml"
+    )
+    return mode_default if Path(mode_default).exists() else "pipeline_config.yaml"
 
 
 def main() -> None:
@@ -63,8 +82,11 @@ def main() -> None:
     )
     of_gen.add_argument(
         "--config",
-        default="pipeline_config.yaml",
-        help="Path to pipeline config file (default: pipeline_config.yaml)",
+        default=None,
+        help=(
+            "Path to pipeline config file (default: the mode-specific "
+            "pipeline_config_<mode>.yaml, else pipeline_config.yaml)"
+        ),
     )
     of_gen.add_argument(
         "--script",
@@ -108,8 +130,11 @@ def main() -> None:
     )
     of_run.add_argument(
         "--config",
-        default="pipeline_config.yaml",
-        help="Path to pipeline config file (default: pipeline_config.yaml)",
+        default=None,
+        help=(
+            "Path to pipeline config file (default: the mode-specific "
+            "pipeline_config_<mode>.yaml, else pipeline_config.yaml)"
+        ),
     )
     of_run.add_argument(
         "--script",
@@ -166,23 +191,25 @@ def main() -> None:
     elif args.command == "orthofinder":
         if args.orthofinder_command == "generate":
             mode = _resolve_orthofinder_mode(parser, args)
+            config_path = _resolve_config_path(args.config, mode)
             if mode == "single-node":
                 from convgeno.cli.orthofinder_cmd import run_generate
 
-                run_generate(config_path=args.config, script_path=args.script)
+                run_generate(config_path=config_path, script_path=args.script)
             else:
                 from convgeno.cli.orthofinder_cmd import run_generate_multinode
 
                 run_generate_multinode(
-                    config_path=args.config, script_dir=args.script_dir
+                    config_path=config_path, script_dir=args.script_dir
                 )
         elif args.orthofinder_command == "run":
             mode = _resolve_orthofinder_mode(parser, args)
+            config_path = _resolve_config_path(args.config, mode)
             if mode == "single-node":
                 from convgeno.cli.orthofinder_cmd import run_submit
 
                 run_submit(
-                    config_path=args.config,
+                    config_path=config_path,
                     script_path=args.script,
                     skip_confirm=args.yes,
                 )
@@ -190,7 +217,7 @@ def main() -> None:
                 from convgeno.cli.orthofinder_cmd import run_submit_multinode
 
                 run_submit_multinode(
-                    config_path=args.config,
+                    config_path=config_path,
                     script_dir=args.script_dir,
                     skip_confirm=args.yes,
                 )
