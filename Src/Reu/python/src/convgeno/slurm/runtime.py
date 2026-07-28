@@ -34,7 +34,9 @@ __all__ = [
 ]
 
 
-def render_ultrametric_autostep(project_dir: str, results_expr: str) -> str:
+def render_ultrametric_autostep(
+    project_dir: str, results_expr: str, calibration_arg: str | None = None
+) -> str:
     """Shell block that runs r8s on the OrthoFinder species tree after a run.
 
     Emitted at the tail of a successful OrthoFinder job (single- or multi-node)
@@ -46,20 +48,30 @@ def render_ultrametric_autostep(project_dir: str, results_expr: str) -> str:
     Results directory — ``$OUTPUT_DIR`` for single-node (results at
     ``$OUTPUT_DIR/Results_*``), ``$FINAL_RESULTS`` for multi-node (the deep
     ``$WORK_DIR/OrthoFinder/Results_*`` the resume script already resolves).
-    ``make_tree_ultrametric.py`` handles either depth. No species-pair
-    calibration is assumed here (relative-time, root-anchored).
+    ``make_tree_ultrametric.py`` handles either depth.
+
+    *calibration_arg* is a ``make_tree_ultrametric.py --calibration`` value
+    (``NAME:SP1,SP2:AGE``) from ``convgeno init``. When given, r8s scales the
+    tree to real time; when ``None``, the root is anchored (relative time).
     """
     script = f"{project_dir}/Src/Loc/scripts/make_tree_ultrametric.py"
+    cmd_lines = [
+        f'python "{script}" \\',
+        f'    "{results_expr}" \\',
+        '    -o "$OUTPUT_DIR/species_tree_ultrametric.nwk" \\',
+    ]
+    if calibration_arg:
+        cmd_lines.append(f'    --calibration "{calibration_arg}" \\')
+    else:
+        cmd_lines.append("    --root-age 1 \\")
+    cmd_lines.append("    --skip-if-unavailable")
+    command = "\n".join(cmd_lines)
     return f'''\
 # ---- convgeno: auto ultrametric step (r8s; optional, non-fatal) ----
 echo "Attempting automatic ultrametric conversion of the species tree (r8s)..."
 export PATH="$HOME/.local/bin:$PATH"   # r8s from tools/r8s/install_r8s.sh installs here
 set +e
-python "{script}" \\
-    "{results_expr}" \\
-    -o "$OUTPUT_DIR/species_tree_ultrametric.nwk" \\
-    --root-age 1 \\
-    --skip-if-unavailable
+{command}
 CONVGENO_R8S_STATUS=$?
 set -e
 if [ "$CONVGENO_R8S_STATUS" -ne 0 ]; then

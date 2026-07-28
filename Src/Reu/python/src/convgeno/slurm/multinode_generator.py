@@ -1646,9 +1646,13 @@ def generate_resume_script(
     mafft_shim = render_mafft_msa_shim()
     # Auto ultrametric step: multi-node results live deep at
     # $WORK_DIR/OrthoFinder/Results_* — the success block resolves that as
-    # $FINAL_RESULTS, which we hand straight to make_tree_ultrametric.
+    # $FINAL_RESULTS, which we hand straight to make_tree_ultrametric. Use the
+    # init-time calibration if one was configured, else root-anchor.
+    calibration_arg = (
+        config.ultrametric.calibration_cli_arg() if config.ultrametric else None
+    )
     ultrametric_block = render_ultrametric_autostep(
-        config.project_dir, "$FINAL_RESULTS"
+        config.project_dir, "$FINAL_RESULTS", calibration_arg
     )
 
     # Resolve analysis threads (-a): use the configured value, falling back

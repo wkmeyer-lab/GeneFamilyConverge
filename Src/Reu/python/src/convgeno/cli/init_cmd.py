@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from datetime import datetime
 from pathlib import Path
 
 from convgeno.external.config import OrthoFinderConfig
-from convgeno.slurm.config import PipelineConfig, SlurmConfig, normalize_optional_account
+from convgeno.io.fasta import FASTA_EXTENSIONS
+from convgeno.slurm.config import (
+    PipelineConfig,
+    SlurmConfig,
+    UltrametricConfig,
+    normalize_optional_account,
+)
 from convgeno.slurm.discovery import (
     detect_node_cpus,
     detect_partition_memory,
@@ -58,6 +65,116 @@ def _prompt_int(message: str, default: int) -> int:
         print("  Value must be at least 1.")
         return _prompt_int(message, default)
     return value
+
+
+def _prompt_float(message: str) -> float:
+    """Prompt for a positive float value (re-prompts until valid)."""
+    while True:
+        raw = _prompt(message)
+        try:
+            value = float(raw)
+        except ValueError:
+            print("  Please enter a number (e.g. 94 or 94.0).")
+            continue
+        if value <= 0:
+            print("  Value must be greater than 0.")
+            continue
+        return value
+
+
+#: A species name is used verbatim as an OrthoFinder tip label and embedded in
+#: the r8s ``--calibration NAME:SP1,SP2:AGE`` argument, so it must not contain
+#: the ``:``/``,`` delimiters or shell-hostile characters.
+_SAFE_SPECIES_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _proteome_species_names(input_dir: Path) -> set[str]:
+    """Return the species names (FASTA basenames) present in *input_dir*.
+
+    Empty if the directory does not exist yet (proteomes not prepared), in which
+    case calibration species can't be validated at ``init`` time.
+    """
+    if not input_dir.is_dir():
+        return set()
+    return {
+        entry.stem
+        for entry in input_dir.iterdir()
+        if entry.is_file() and entry.suffix.lower() in FASTA_EXTENSIONS
+    }
+
+
+def _is_valid_species(name: str, available: set[str]) -> bool:
+    """True if *name* is well-formed and (when known) present in *available*."""
+    if not _SAFE_SPECIES_RE.match(name):
+        return False
+    return not available or name in available
+
+
+def _report_bad_species(name: str, available: set[str]) -> None:
+    if not _SAFE_SPECIES_RE.match(name):
+        print(
+            f"  '{name}' has unsupported characters; use only letters, digits, "
+            "'.', '_', '-' (the proteome basename)."
+        )
+    elif available:
+        sample = ", ".join(sorted(available)[:8])
+        print(f"  '{name}' is not one of your proteome species. Examples: {sample}")
+
+
+def _prompt_species(message: str, available: set[str]) -> str:
+    """Prompt (required) for a valid species name, re-prompting on error."""
+    while True:
+        name = _prompt(message)
+        if _is_valid_species(name, available):
+            return name
+        _report_bad_species(name, available)
+
+
+def _prompt_calibration(input_dir: Path) -> UltrametricConfig:
+    """Prompt for the two-species + divergence-time r8s calibration.
+
+    Species are validated against the proteome files in *input_dir* when those
+    exist. Pressing Enter at the first prompt skips calibration (the tree is
+    then made ultrametric in relative time).
+    """
+    print("\n=== Species tree calibration (r8s ultrametric step) ===")
+    print(
+        "r8s scales the OrthoFinder species tree to time from ONE calibration:\n"
+        "two species and their divergence time in millions of years. Name each\n"
+        "species EXACTLY as its proteome file basename (no extension), e.g.\n"
+        "'Homo_sapiens'."
+    )
+    available = _proteome_species_names(input_dir)
+    if available:
+        print(f"  {len(available)} proteome species found in {input_dir}.")
+    else:
+        print(
+            f"  (No proteomes in {input_dir} yet — names will be verified against "
+            "the species tree at run time.)"
+        )
+
+    first = _prompt_optional(
+        "First calibration species (Enter to skip and use relative time)"
+    )
+    if first is None:
+        print(
+            "  No calibration set: the tree will be made ultrametric in RELATIVE "
+            "time (root-anchored). Re-run 'convgeno init' to add one later."
+        )
+        return UltrametricConfig()
+
+    if not _is_valid_species(first, available):
+        _report_bad_species(first, available)
+        first = _prompt_species("First calibration species", available)
+
+    second = _prompt_species("Second calibration species", available)
+    while second == first:
+        print("  The two species must be different.")
+        second = _prompt_species("Second calibration species", available)
+
+    age = _prompt_float("Divergence time between them (millions of years)")
+    print(f"  Calibration set: MRCA({first}, {second}) = {age:g} Myr.")
+    return UltrametricConfig(species_a=first, species_b=second, divergence_my=age)
 
 
 def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
@@ -337,6 +454,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         msa_program=msa_program,
     )
 
+    ultrametric = _prompt_calibration(Path(orthofinder.input_dir))
+
     # ---- Detect conda runtime configuration ----
     print("\n=== Detecting conda runtime ===\n")
     try:
@@ -380,6 +499,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         slurm=slurm,
         orthofinder=orthofinder,
         runtime=runtime_config,
+        ultrametric=ultrametric,
     )
 
     # One config per execution mode, each with a mode-named output_dir sharing
@@ -415,6 +535,13 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  OrthoFinder -t:     {search_threads}")
     print(f"  OrthoFinder -a:     {analysis_threads}")
     print(f"  OrthoFinder MSA:    {msa_program}")
+    if ultrametric.has_calibration():
+        print(
+            f"  r8s calibration:    MRCA({ultrametric.species_a}, "
+            f"{ultrametric.species_b}) = {ultrametric.divergence_my:g} Myr"
+        )
+    else:
+        print("  r8s calibration:    none (relative-time, root-anchored)")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")

@@ -121,6 +121,7 @@ class TestInitCreatesConfig:
             "72:00:00",     # time limit
             "",             # mail user (skip)
             "",             # account (skip)
+            "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
         ])
 
@@ -191,6 +192,64 @@ class TestInitCreatesConfig:
         sn_dir = Path(sn.orthofinder.output_dir)
         assert sn_dir.name == f"orthofinder_singlenode_{timestamp_suffix}"
 
+    def test_calibration_prompted_validated_and_saved(self, tmp_path: Path):
+        # Proteomes present so the calibration species can be validated.
+        proteomes = tmp_path / "Data" / "interim" / "cleaned_proteomes"
+        proteomes.mkdir(parents=True)
+        (proteomes / "Homo_sapiens.faa").write_text(">x\nMK\n", encoding="utf-8")
+        (proteomes / "Felis_catus.faa").write_text(">x\nMK\n", encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            "Homo_sapiens",  # calibration species A (valid)
+            "Felis_catus",   # calibration species B (valid)
+            "94",            # divergence (Myr)
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        with (
+            patch("convgeno.cli.init_cmd.discover_partitions", return_value=[]),
+            patch(
+                "convgeno.cli.init_cmd.detect_partition_memory",
+                return_value={
+                    "max_mem_per_cpu_mb": None,
+                    "def_mem_per_cpu_mb": None,
+                    "max_mem_per_node_mb": None,
+                    "def_mem_per_node_mb": None,
+                    "min_node_memory_mb": 100000,
+                },
+            ),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
+            patch("builtins.input", side_effect=inputs),
+        ):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        assert loaded.ultrametric is not None
+        assert loaded.ultrametric.species_a == "Homo_sapiens"
+        assert loaded.ultrametric.species_b == "Felis_catus"
+        assert loaded.ultrametric.divergence_my == 94.0
+        assert (
+            loaded.ultrametric.calibration_cli_arg()
+            == "Homo_sapiens_Felis_catus:Homo_sapiens,Felis_catus:94"
+        )
+
     def test_no_partitions_detected(self, tmp_path: Path):
         output = tmp_path / "config.yaml"
 
@@ -204,6 +263,7 @@ class TestInitCreatesConfig:
             "24:00:00",            # time limit
             "user@example.com",    # mail
             "myaccount",           # account
+            "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
         ])
 
@@ -256,6 +316,7 @@ class TestInitCreatesConfig:
             "72:00:00",            # time limit
             "",                    # mail
             "",                    # account
+            "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
         ])
 
@@ -319,6 +380,7 @@ class TestInitOverwriteBehaviour:
             "12:00:00",   # time
             "",           # mail (skip)
             "",           # account (skip)
+            "",           # calibration species (skip)
             "",           # accept detected runtime defaults, if present
         ])
 
@@ -371,6 +433,7 @@ class TestInitWarnings:
             "72:00:00",     # time
             "",             # mail
             "",             # account
+            "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
         ])
 

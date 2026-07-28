@@ -14,8 +14,59 @@ from convgeno.slurm.config import (
     MultinodeConfig,
     PipelineConfig,
     SlurmConfig,
+    UltrametricConfig,
     normalize_optional_account,
 )
+
+
+class TestUltrametricConfig:
+    def test_calibration_cli_arg_and_has_calibration(self):
+        cfg = UltrametricConfig(
+            species_a="Homo_sapiens", species_b="Felis_catus", divergence_my=94.0
+        )
+        assert cfg.has_calibration() is True
+        assert (
+            cfg.calibration_cli_arg()
+            == "Homo_sapiens_Felis_catus:Homo_sapiens,Felis_catus:94"
+        )
+
+    def test_empty_has_no_calibration(self):
+        cfg = UltrametricConfig()
+        assert cfg.has_calibration() is False
+        assert cfg.calibration_cli_arg() is None
+
+    def test_from_dict_ignores_unknown_keys(self):
+        cfg = UltrametricConfig.from_dict(
+            {"species_a": "a", "species_b": "b", "divergence_my": 10, "future": "x"}
+        )
+        assert cfg.species_a == "a" and cfg.divergence_my == 10
+
+    def test_pipeline_config_round_trips_calibration(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            ultrametric=UltrametricConfig(
+                species_a="Homo_sapiens", species_b="Felis_catus", divergence_my=94.0
+            ),
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "ultrametric:" in path.read_text(encoding="utf-8")
+        loaded = PipelineConfig.load(path)
+        assert loaded.ultrametric is not None
+        assert loaded.ultrametric.species_a == "Homo_sapiens"
+        assert loaded.ultrametric.divergence_my == 94.0
+
+    def test_pipeline_config_omits_empty_calibration(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            ultrametric=UltrametricConfig(),  # skipped calibration
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "ultrametric:" not in path.read_text(encoding="utf-8")
+        assert PipelineConfig.load(path).ultrametric is None
 
 
 class TestSlurmConfigFromDict:

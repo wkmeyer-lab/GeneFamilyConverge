@@ -53,6 +53,32 @@ class TestUltrametricAutostep:
         assert "species_tree_ultrametric.nwk" in script
         assert '"$OUTPUT_DIR"' in script  # single-node passes the output dir
 
+    def test_calibration_passed_when_configured(self, sample_config):
+        import dataclasses
+
+        from convgeno.slurm.config import UltrametricConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            ultrametric=UltrametricConfig(
+                species_a="Homo_sapiens",
+                species_b="Felis_catus",
+                divergence_my=94.0,
+            ),
+        )
+        script = generate_orthofinder_script(cfg)
+        assert (
+            '--calibration "Homo_sapiens_Felis_catus:Homo_sapiens,Felis_catus:94"'
+            in script
+        )
+        assert "--root-age" not in script  # a real calibration replaces the anchor
+
+    def test_relative_time_when_no_calibration(self, sample_config):
+        # No ultrametric config -> root-anchored relative time.
+        script = generate_orthofinder_script(sample_config)
+        assert "--root-age 1" in script
+        assert "--calibration" not in script
+
     def test_single_node_script_is_valid_bash(self, sample_config, tmp_path: Path):
         import shutil
         import subprocess

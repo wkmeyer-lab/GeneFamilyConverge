@@ -215,7 +215,13 @@ echo "This is persistent scratch and will be removed by the cluster's purge poli
     # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
     mafft_shim = render_mafft_msa_shim()
     # Auto ultrametric step: single-node results live at $OUTPUT_DIR/Results_*.
-    ultrametric_block = render_ultrametric_autostep(config.project_dir, "$OUTPUT_DIR")
+    # Use the init-time calibration if one was configured, else root-anchor.
+    calibration_arg = (
+        config.ultrametric.calibration_cli_arg() if config.ultrametric else None
+    )
+    ultrametric_block = render_ultrametric_autostep(
+        config.project_dir, "$OUTPUT_DIR", calibration_arg
+    )
 
     script = f"""\
 #!/bin/bash

@@ -161,6 +161,52 @@ class MultinodeConfig:
 
 
 @dataclass(frozen=True)
+class UltrametricConfig:
+    """Calibration for the r8s ultrametric step, collected by ``convgeno init``.
+
+    ``species_a`` and ``species_b`` are two species named EXACTLY as their
+    proteome files (= OrthoFinder tip labels); ``divergence_my`` is their
+    divergence time in millions of years. The automatic post-OrthoFinder r8s
+    step uses this single calibration to scale the species tree to time. When
+    no calibration is set, the tree is made ultrametric in relative time
+    (root-anchored).
+    """
+
+    species_a: str | None = None
+    species_b: str | None = None
+    divergence_my: float | None = None
+
+    def has_calibration(self) -> bool:
+        """True when a complete two-species + age calibration is present."""
+        return (
+            bool(self.species_a)
+            and bool(self.species_b)
+            and self.divergence_my is not None
+        )
+
+    def calibration_cli_arg(self) -> str | None:
+        """The ``make_tree_ultrametric.py --calibration`` value, or ``None``.
+
+        Format is ``NAME:SP1,SP2:AGE`` (see the Loc CLI). Species names are
+        validated at ``init`` to contain no ``:``/``,`` so this is unambiguous.
+        """
+        if not self.has_calibration():
+            return None
+        node = f"{self.species_a}_{self.species_b}"
+        return f"{node}:{self.species_a},{self.species_b}:{self.divergence_my:g}"
+
+    def to_dict(self) -> dict:
+        """Serialize, omitting ``None`` fields."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> UltrametricConfig:
+        """Construct from a dict; unknown keys ignored for forward-compat."""
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline configuration combining project paths and SLURM settings."""
 
@@ -170,6 +216,7 @@ class PipelineConfig:
     orthofinder: Optional[OrthoFinderConfig] = None
     runtime: Optional[CondaRuntimeConfig] = None
     multinode: Optional[MultinodeConfig] = None
+    ultrametric: UltrametricConfig | None = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
@@ -184,6 +231,8 @@ class PipelineConfig:
             data["orthofinder"] = self.orthofinder.to_dict()
         if self.multinode is not None:
             data["multinode"] = self.multinode.to_dict()
+        if self.ultrametric is not None and self.ultrametric.has_calibration():
+            data["ultrametric"] = self.ultrametric.to_dict()
         if self.runtime is not None:
             data.update(runtime_config_to_dict(self.runtime))
         with open(path, "w", encoding="utf-8") as f:
@@ -219,6 +268,8 @@ class PipelineConfig:
         )
         mn_dict = data.get("multinode")
         mn_config = MultinodeConfig.from_dict(mn_dict) if mn_dict else None
+        ultra_dict = data.get("ultrametric")
+        ultra_config = UltrametricConfig.from_dict(ultra_dict) if ultra_dict else None
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
@@ -226,4 +277,5 @@ class PipelineConfig:
             orthofinder=of_config,
             runtime=runtime_config,
             multinode=mn_config,
+            ultrametric=ultra_config,
         )
