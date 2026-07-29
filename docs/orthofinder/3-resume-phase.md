@@ -110,7 +110,7 @@ OrthoFinder opens on the order of `n²` files at once during the orthologue step
 (issue #571: 454 species needs r ≈ 206k). The job computes the requirement from
 the species count `n`:
 
-```
+```text
 required_r = ceil(n² · 1.1) + 1024
 ```
 
@@ -161,7 +161,7 @@ fd gates always run on the pointer's `WorkingDirectory` first.
 
 ### 6. Run `orthofinder -b`
 
-```
+```bash
 orthofinder -b "$WORK_DIR" -t <search_threads> -a <analysis_threads> \
     -p "$OF_TMP" -M msa -A <msa_program> -T <tree_program>
 ```
