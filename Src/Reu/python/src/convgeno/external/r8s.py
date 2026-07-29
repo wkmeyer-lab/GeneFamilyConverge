@@ -594,11 +594,12 @@ def parse_ultrametric_tree(r8s_output: str | Path) -> str:
 
 
 def make_ultrametric(
-    orthofinder_output_dir: Path | str,
+    orthofinder_output_dir: Path | str | None,
     calibrations: Iterable[Calibration],
     *,
     out_tree: Path | str,
     work_dir: Path | str,
+    input_tree: Path | str | None = None,
     nsites: int | None = None,
     r8s_path: str = "r8s",
     method: str = "pl",
@@ -620,8 +621,10 @@ def make_ultrametric(
 
     Parameters
     ----------
-    orthofinder_output_dir : Path or str
-        OrthoFinder ``-o`` output dir, or a ``Results_*`` dir directly.
+    orthofinder_output_dir : Path, str, or None
+        OrthoFinder ``-o`` output dir, or a ``Results_*`` dir directly. May be
+        ``None`` when ``input_tree`` is given together with an explicit
+        ``nsites`` — then no OrthoFinder output is read at all.
     calibrations : iterable of Calibration
         Node calibrations. May be empty — then the root is anchored at
         ``root_age`` and r8s produces a *relative-time* ultrametric tree.
@@ -629,6 +632,10 @@ def make_ultrametric(
         Where to write the ultrametric Newick.
     work_dir : Path or str
         Scratch dir for the control file and raw r8s output.
+    input_tree : Path or str, optional
+        Date THIS rooted Newick instead of discovering OrthoFinder's
+        ``SpeciesTree_rooted.txt``. When given without ``nsites``, OrthoFinder's
+        alignment is still read (from ``orthofinder_output_dir``) to derive it.
     nsites : int, optional
         Override the auto-derived alignment column count.
     r8s_path : str
@@ -657,14 +664,43 @@ def make_ultrametric(
     work_dir.mkdir(parents=True, exist_ok=True)
     calibrations = list(calibrations)
 
-    species_tree_path, alignment_path = find_species_tree_files(orthofinder_output_dir)
-
-    if nsites is None:
-        nsites = count_alignment_sites(alignment_path)
+    if input_tree is not None:
+        species_tree_path = Path(input_tree)
+        if not species_tree_path.is_file():
+            raise FileNotFoundError(
+                f"Input species tree not found: {species_tree_path}"
+            )
+        if nsites is None:
+            # r8s scales per-site branch lengths by nsites; with a user tree but
+            # no explicit nsites, fall back to OrthoFinder's alignment width.
+            if orthofinder_output_dir is None:
+                raise ValueError(
+                    "nsites is required with input_tree when no OrthoFinder output "
+                    "dir is given (pass nsites, or the OrthoFinder output dir)."
+                )
+            _, alignment_path = find_species_tree_files(orthofinder_output_dir)
+            nsites = count_alignment_sites(alignment_path)
+        else:
+            logger.info(
+                "Dating user-supplied tree %s with nsites=%d.",
+                species_tree_path,
+                nsites,
+            )
     else:
-        logger.info(
-            "Using caller-supplied nsites=%d (overriding alignment count).", nsites
+        if orthofinder_output_dir is None:
+            raise ValueError(
+                "Either orthofinder_output_dir or input_tree must be given."
+            )
+        species_tree_path, alignment_path = find_species_tree_files(
+            orthofinder_output_dir
         )
+        if nsites is None:
+            nsites = count_alignment_sites(alignment_path)
+        else:
+            logger.info(
+                "Using caller-supplied nsites=%d (overriding alignment count).",
+                nsites,
+            )
 
     species_tree_obj = Phylo.read(str(species_tree_path), "newick")
     tip_names = {tip.name for tip in species_tree_obj.get_terminals()}

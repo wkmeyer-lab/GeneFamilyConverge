@@ -51,9 +51,15 @@ from pathlib import Path
 import yaml
 
 from convgeno.external.r8s import Calibration, make_ultrametric
+from convgeno.io.fasta import FASTA_EXTENSIONS
 from convgeno.utils.command_runner import check_tool_available
 from convgeno.utils.logging import setup_logging
-from convgeno.validation.trees import is_ultrametric, validate_tree
+from convgeno.validation.trees import (
+    check_tips_match_species,
+    is_ultrametric,
+    ultrametric_deviation,
+    validate_tree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +175,113 @@ def _dig(mapping: dict, *keys: str):
 
 
 # -------------------------------------------------------------------
+# User-supplied species tree helpers
+# -------------------------------------------------------------------
+
+
+def _species_from_dir(species_dir: Path) -> set[str]:
+    """Return proteome species names (FASTA basenames) present in *species_dir*."""
+    if not species_dir.is_dir():
+        return set()
+    return {
+        entry.stem
+        for entry in species_dir.iterdir()
+        if entry.is_file() and entry.suffix.lower() in FASTA_EXTENSIONS
+    }
+
+
+def _report_tip_match(tree_path: Path, species_dir: Path | None) -> None:
+    """Warn if the tree's tips don't match the proteome species set.
+
+    This is the run-time re-validation of a user-supplied tree (the proteomes
+    may not have existed when ``convgeno init`` recorded the tree). It only
+    warns — the strict tip/count check lives in ``prepare_cafe_inputs.py``.
+    """
+    if species_dir is None:
+        return
+    species = _species_from_dir(species_dir)
+    if not species:
+        logger.info(
+            "No proteome FASTAs in %s; deferring the tip-label check.", species_dir
+        )
+        return
+    in_tree, in_proteomes = check_tips_match_species(tree_path, sorted(species))
+    if in_proteomes:
+        logger.warning(
+            "%d proteome species are missing from the tree: %s",
+            len(in_proteomes),
+            sorted(in_proteomes)[:10],
+        )
+    if in_tree:
+        logger.warning(
+            "%d tree tips are not among the proteomes: %s",
+            len(in_tree),
+            sorted(in_tree)[:10],
+        )
+    if not in_tree and not in_proteomes:
+        logger.info("Tree tips match all %d proteome species.", len(species))
+
+
+def _run_assume_ultrametric(
+    input_tree: Path | None,
+    output: Path,
+    species_dir: Path | None,
+    stats_json: Path | None,
+) -> int:
+    """Validate a user tree as ultrametric and copy it to *output* (no r8s).
+
+    Reads no OrthoFinder output. Returns a process exit code.
+    """
+    if input_tree is None:
+        logger.error(
+            "--assume-ultrametric requires --input-tree (or config species_tree.path)."
+        )
+        return 1
+    if not input_tree.is_file():
+        logger.error("Input species tree not found: %s", input_tree)
+        return 1
+
+    issues = validate_tree(input_tree)
+    if issues:
+        logger.error("Input tree is not usable: %s", "; ".join(issues))
+        return 1
+    if not is_ultrametric(input_tree):
+        logger.error(
+            "--assume-ultrametric was given, but %s is NOT ultrametric within "
+            "tolerance (max-min root-to-tip deviation = %g). Re-run WITHOUT "
+            "--assume-ultrametric so r8s can date it.",
+            input_tree,
+            ultrametric_deviation(input_tree),
+        )
+        return 1
+
+    _report_tip_match(input_tree, species_dir)
+
+    text = input_tree.read_text(encoding="utf-8")
+    if not text.endswith("\n"):
+        text += "\n"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+
+    print(f"ultrametric tree (user-supplied, r8s skipped) -> {output}")
+    print("post-validation: tree is rooted, binary, and ultrametric.")
+
+    if stats_json:
+        stats_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(stats_json, "w", encoding="utf-8") as jf:
+            json.dump(
+                {
+                    "mode": "assume_ultrametric",
+                    "input_tree": str(input_tree),
+                    "out_tree": str(output),
+                },
+                jf,
+                indent=2,
+            )
+    return 0
+
+
+# -------------------------------------------------------------------
 # Argument parsing
 # -------------------------------------------------------------------
 
@@ -227,6 +340,28 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override the alignment column count (default: auto / config).",
+    )
+    parser.add_argument(
+        "--input-tree",
+        type=Path,
+        default=None,
+        help="Date THIS rooted Newick instead of discovering OrthoFinder's "
+        "SpeciesTree_rooted.txt (falls back to config species_tree.path).",
+    )
+    parser.add_argument(
+        "--assume-ultrametric",
+        action="store_true",
+        help="Treat --input-tree as already ultrametric: validate it and copy it "
+        "to the output path WITHOUT running r8s (falls back to config "
+        "species_tree.is_ultrametric).",
+    )
+    parser.add_argument(
+        "--species-dir",
+        type=Path,
+        default=None,
+        help="Directory of proteome FASTAs; when given, the tree's tips are "
+        "checked against these species (falls back to config "
+        "orthofinder.input_dir).",
     )
     parser.add_argument(
         "--r8s-path",
@@ -302,11 +437,6 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
     tools = _load_yaml(args.tools)
 
     of_dir = args.orthofinder_output_dir or _dig(config, "orthofinder", "output_dir")
-    if of_dir is None:
-        raise ValueError(
-            "OrthoFinder output dir not given: pass it positionally or set "
-            "orthofinder.output_dir in --config."
-        )
 
     output = args.output or _dig(config, "ultrametric", "output")
     if output is None:
@@ -315,11 +445,21 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
             "in --config."
         )
 
+    input_tree = args.input_tree or _dig(config, "species_tree", "path")
+    assume_ultrametric = args.assume_ultrametric or bool(
+        _dig(config, "species_tree", "is_ultrametric")
+    )
+    species_dir = args.species_dir or _dig(config, "orthofinder", "input_dir")
+
     nsites = args.nsites
     if nsites is None:
         cfg_nsites = _dig(config, "ultrametric", "nsites")
         if isinstance(cfg_nsites, int):
             nsites = cfg_nsites  # a str like "auto" means auto-derive
+    if nsites is None:
+        cfg_st_nsites = _dig(config, "species_tree", "num_sites")
+        if isinstance(cfg_st_nsites, int):
+            nsites = cfg_st_nsites
 
     calibrations = [_parse_calibration(spec) for spec in args.calibration]
     calibrations.extend(_pairs_to_calibrations(args.pairs, args.cal_ages))
@@ -345,9 +485,24 @@ def _resolve_inputs(args: argparse.Namespace) -> dict:
         _dig(config, "ultrametric", "cross_validate")
     )
 
+    # OrthoFinder output is needed unless the tree is taken as-is
+    # (--assume-ultrametric) or a user tree + explicit nsites make it redundant.
+    needs_of_output = not assume_ultrametric and not (
+        input_tree is not None and nsites is not None
+    )
+    if needs_of_output and of_dir is None:
+        raise ValueError(
+            "OrthoFinder output dir not given: pass it positionally or set "
+            "orthofinder.output_dir in --config. It is needed to locate the "
+            "species tree and/or the alignment used for nsites."
+        )
+
     return {
-        "of_dir": Path(of_dir),
+        "of_dir": Path(of_dir) if of_dir is not None else None,
         "output": Path(output),
+        "input_tree": Path(input_tree) if input_tree is not None else None,
+        "assume_ultrametric": assume_ultrametric,
+        "species_dir": Path(species_dir) if species_dir is not None else None,
         "nsites": nsites,
         "calibrations": calibrations,
         "r8s_path": r8s_path,
@@ -372,7 +527,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         resolved = _resolve_inputs(args)
         output = resolved["output"]
+        input_tree = resolved["input_tree"]
         work_dir = args.work_dir or (output.parent / "r8s_work")
+
+        # A user-supplied tree that is already ultrametric skips r8s entirely
+        # (and reads no OrthoFinder output).
+        if resolved["assume_ultrametric"]:
+            return _run_assume_ultrametric(
+                input_tree, output, resolved["species_dir"], args.stats_json
+            )
 
         if (
             args.skip_if_unavailable
@@ -387,11 +550,16 @@ def main(argv: list[str] | None = None) -> int:
             print("r8s not installed; ultrametric step skipped.")
             return 0
 
+        # Re-validate a user tree's tips against the proteomes at run time.
+        if input_tree is not None:
+            _report_tip_match(input_tree, resolved["species_dir"])
+
         stats = make_ultrametric(
             resolved["of_dir"],
             resolved["calibrations"],
             out_tree=output,
             work_dir=work_dir,
+            input_tree=input_tree,
             nsites=resolved["nsites"],
             r8s_path=resolved["r8s_path"],
             method=args.method,

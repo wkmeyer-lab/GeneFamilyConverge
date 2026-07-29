@@ -406,3 +406,69 @@ class TestMakeUltrametric:
                 out_tree=tmp_path / "t.nwk",
                 work_dir=tmp_path / "w",
             )
+
+    def test_input_tree_dates_user_tree_nsites_from_of(
+        self, orthofinder_output_dir: Path, tmp_path: Path, monkeypatch
+    ):
+        # A user tree is dated, but nsites still comes from OrthoFinder's alignment.
+        captured: dict = {}
+        monkeypatch.setattr(command_runner, "run", _fake_run_factory(captured))
+        monkeypatch.setattr(command_runner, "check_tool_available", lambda _t: True)
+
+        user_tree = tmp_path / "user.nwk"
+        user_tree.write_text("((human:0.2,cat:0.2):0.1,dog:0.4);\n", encoding="utf-8")
+
+        stats = r8s.make_ultrametric(
+            orthofinder_output_dir,
+            [Calibration("hc", ("human", "cat"), age=94)],
+            out_tree=tmp_path / "t.nwk",
+            work_dir=tmp_path / "w",
+            input_tree=user_tree,
+        )
+        assert stats["nsites"] == 12  # from the fixture's 12-column alignment
+        assert "0.20000000" in captured["ctl"]  # the USER tree's branch lengths
+
+    def test_input_tree_with_nsites_needs_no_orthofinder(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # input_tree + explicit nsites: no OrthoFinder output is read at all.
+        captured: dict = {}
+        monkeypatch.setattr(command_runner, "run", _fake_run_factory(captured))
+        monkeypatch.setattr(command_runner, "check_tool_available", lambda _t: True)
+
+        user_tree = tmp_path / "user.nwk"
+        user_tree.write_text("((human:0.2,cat:0.2):0.1,dog:0.4);\n", encoding="utf-8")
+
+        stats = r8s.make_ultrametric(
+            None,  # no OrthoFinder output dir
+            [Calibration("hc", ("human", "cat"), age=94)],
+            out_tree=tmp_path / "t.nwk",
+            work_dir=tmp_path / "w",
+            input_tree=user_tree,
+            nsites=321,
+        )
+        assert stats["nsites"] == 321
+        assert "blformat nsites=321 lengths=persite" in captured["ctl"]
+
+    def test_input_tree_without_nsites_or_of_raises(self, tmp_path: Path):
+        user_tree = tmp_path / "user.nwk"
+        user_tree.write_text("((human:0.2,cat:0.2):0.1,dog:0.4);\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="nsites is required"):
+            r8s.make_ultrametric(
+                None,
+                [Calibration("hc", ("human", "cat"), age=94)],
+                out_tree=tmp_path / "t.nwk",
+                work_dir=tmp_path / "w",
+                input_tree=user_tree,
+            )
+
+    def test_missing_input_tree_raises(self, tmp_path: Path):
+        with pytest.raises(FileNotFoundError, match="Input species tree"):
+            r8s.make_ultrametric(
+                None,
+                [Calibration("hc", ("human", "cat"), age=94)],
+                out_tree=tmp_path / "t.nwk",
+                work_dir=tmp_path / "w",
+                input_tree=tmp_path / "does_not_exist.nwk",
+                nsites=100,
+            )
