@@ -121,6 +121,7 @@ class TestInitCreatesConfig:
             "72:00:00",     # time limit
             "",             # mail user (skip)
             "",             # account (skip)
+            "",             # user species tree (skip)
             "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
         ])
@@ -210,6 +211,7 @@ class TestInitCreatesConfig:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # user species tree (skip)
             "Homo_sapiens",  # calibration species A (valid)
             "Felis_catus",   # calibration species B (valid)
             "94",            # divergence (Myr)
@@ -263,6 +265,7 @@ class TestInitCreatesConfig:
             "24:00:00",            # time limit
             "user@example.com",    # mail
             "myaccount",           # account
+            "",                    # user species tree (skip)
             "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
         ])
@@ -316,6 +319,7 @@ class TestInitCreatesConfig:
             "72:00:00",            # time limit
             "",                    # mail
             "",                    # account
+            "",                    # user species tree (skip)
             "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
         ])
@@ -380,6 +384,7 @@ class TestInitOverwriteBehaviour:
             "12:00:00",   # time
             "",           # mail (skip)
             "",           # account (skip)
+            "",           # user species tree (skip)
             "",           # calibration species (skip)
             "",           # accept detected runtime defaults, if present
         ])
@@ -433,6 +438,7 @@ class TestInitWarnings:
             "72:00:00",     # time
             "",             # mail
             "",             # account
+            "",             # user species tree (skip)
             "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
         ])
@@ -465,3 +471,136 @@ class TestInitWarnings:
         captured = capsys.readouterr()
         assert "Warning" in captured.out
         assert _mode_config_path(output, "multinode").exists()
+
+
+class TestInitUserSpeciesTree:
+    """The optional 'bring your own species tree' prompt (design step 1)."""
+
+    def _proteomes(self, tmp_path: Path) -> None:
+        proteomes = tmp_path / "Data" / "interim" / "cleaned_proteomes"
+        proteomes.mkdir(parents=True)
+        for name in ("human", "cat", "dog"):
+            (proteomes / f"{name}.faa").write_text(">x\nMK\n", encoding="utf-8")
+
+    def _patches(self):
+        return (
+            patch("convgeno.cli.init_cmd.discover_partitions", return_value=[]),
+            patch(
+                "convgeno.cli.init_cmd.detect_partition_memory",
+                return_value={
+                    "max_mem_per_cpu_mb": None,
+                    "def_mem_per_cpu_mb": None,
+                    "max_mem_per_node_mb": None,
+                    "def_mem_per_node_mb": None,
+                    "min_node_memory_mb": 100000,
+                },
+            ),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
+        )
+
+    def test_ultrametric_tree_skips_calibration(self, tmp_path: Path):
+        self._proteomes(tmp_path)
+        tree = tmp_path / "dated.nwk"
+        tree.write_text("((human:47,cat:47):47,dog:94);\n", encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            str(tree),       # user species tree path
+            "y",             # is ultrametric? -> verified, calibration skipped
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        assert loaded.species_tree is not None
+        assert loaded.species_tree.path == str(tree.resolve())
+        assert loaded.species_tree.is_ultrametric is True
+        assert loaded.species_tree.num_sites is None
+        # r8s calibration was skipped, so no ultrametric block is persisted.
+        assert loaded.ultrametric is None
+
+    def test_non_ultrametric_tree_keeps_calibration_and_num_sites(
+        self, tmp_path: Path
+    ):
+        self._proteomes(tmp_path)
+        tree = tmp_path / "additive.nwk"
+        tree.write_text("((human:0.10,cat:0.12):0.05,dog:0.20);\n", encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            str(tree),       # user species tree path
+            "n",             # is ultrametric? no
+            "500",           # num_sites for r8s
+            "human",         # calibration species A
+            "cat",           # calibration species B
+            "94",            # divergence (Myr)
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        assert loaded.species_tree is not None
+        assert loaded.species_tree.is_ultrametric is False
+        assert loaded.species_tree.num_sites == 500
+        # A non-ultrametric tree still goes through r8s, so calibration is kept.
+        assert loaded.ultrametric is not None
+        assert loaded.ultrametric.species_a == "human"
+        assert loaded.ultrametric.species_b == "cat"
+        assert loaded.ultrametric.divergence_my == 94.0
+
+    def test_skipping_tree_keeps_orthofinder_default(self, tmp_path: Path):
+        self._proteomes(tmp_path)
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            "",              # user species tree (skip -> OrthoFinder default)
+            "",              # calibration species (skip)
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        assert loaded.species_tree is None

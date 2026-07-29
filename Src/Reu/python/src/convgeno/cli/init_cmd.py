@@ -12,6 +12,7 @@ from convgeno.io.fasta import FASTA_EXTENSIONS
 from convgeno.slurm.config import (
     PipelineConfig,
     SlurmConfig,
+    SpeciesTreeConfig,
     UltrametricConfig,
     normalize_optional_account,
 )
@@ -26,6 +27,13 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     detect_conda_runtime,
     runtime_config_to_dict,
+)
+from convgeno.validation.trees import (
+    check_tips_match_species,
+    is_ultrametric,
+    root_to_tip_depths,
+    ultrametric_deviation,
+    validate_tree,
 )
 
 
@@ -78,6 +86,32 @@ def _prompt_float(message: str) -> float:
             continue
         if value <= 0:
             print("  Value must be greater than 0.")
+            continue
+        return value
+
+
+def _prompt_yes_no(message: str, default: bool = False) -> bool:
+    """Prompt for a yes/no answer, returning *default* on empty input."""
+    suffix = "[Y/n]" if default else "[y/N]"
+    raw = input(f"{message} {suffix}: ").strip().lower()
+    if not raw:
+        return default
+    return raw.startswith("y")
+
+
+def _prompt_int_optional(message: str) -> int | None:
+    """Prompt for an optional positive integer. Returns None on empty input."""
+    while True:
+        raw = input(f"{message} (press Enter to skip): ").strip()
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            print("  Please enter a valid integer.")
+            continue
+        if value < 1:
+            print("  Value must be at least 1.")
             continue
         return value
 
@@ -175,6 +209,118 @@ def _prompt_calibration(input_dir: Path) -> UltrametricConfig:
     age = _prompt_float("Divergence time between them (millions of years)")
     print(f"  Calibration set: MRCA({first}, {second}) = {age:g} Myr.")
     return UltrametricConfig(species_a=first, species_b=second, divergence_my=age)
+
+
+def _verify_ultrametric(tree_path: Path) -> bool:
+    """Verify a tree is ultrametric, reporting the numeric root-to-tip spread.
+
+    Returns True only when :func:`is_ultrametric` confirms it. On failure the
+    per-tip root-to-tip depths are printed so the user can see why, and the tree
+    is treated as non-ultrametric (r8s will date it), since CAFE-5 needs a
+    genuinely ultrametric tree.
+    """
+    depths = root_to_tip_depths(tree_path)
+    deviation = ultrametric_deviation(tree_path)
+    height = max(depths.values()) if depths else 0.0
+    relative = (deviation / height) if height > 0 else 0.0
+    print(
+        f"  Root-to-tip depth: height={height:g}, max-min deviation="
+        f"{deviation:g} ({relative:.2%} of height)."
+    )
+    if is_ultrametric(tree_path):
+        print("  Verified ultrametric: the r8s dating step will be skipped.")
+        return True
+    print(
+        "  This tree is NOT ultrametric within tolerance. It will be treated as\n"
+        "  non-ultrametric so r8s can date it (CAFE-5 requires an ultrametric tree)."
+    )
+    print("  Per-tip root-to-tip depths:")
+    for name, depth in sorted(depths.items(), key=lambda kv: kv[1]):
+        print(f"    {name}: {depth:g}")
+    return False
+
+
+def _prompt_species_tree(input_dir: Path) -> SpeciesTreeConfig | None:
+    """Prompt for an optional user-supplied species tree.
+
+    Returns ``None`` when the user declines (OrthoFinder infers the tree).
+    Otherwise the Newick file is validated (parseable, rooted, binary),
+    ultrametricity is verified when the user claims it, and — when proteomes are
+    already staged — the tip labels are checked against the proteome species for
+    instant feedback. Re-prompts on an unreadable or invalid tree; pressing
+    Enter at the re-prompt backs out to the OrthoFinder default.
+    """
+    print("\n=== Species tree (optional: bring your own) ===")
+    print(
+        "By default OrthoFinder infers the species tree. If you already have a\n"
+        "trusted tree for these proteomes, provide it here as a Newick file. Tip\n"
+        "labels must match your proteome filenames (no extension)."
+    )
+    while True:
+        path_str = _prompt_optional(
+            "Path to your own species tree (Newick) [Enter to use OrthoFinder's]"
+        )
+        if path_str is None:
+            return None
+
+        tree_path = Path(path_str).expanduser()
+        if not tree_path.is_file():
+            print(f"  File not found: {tree_path}")
+            continue
+
+        errors = validate_tree(tree_path)
+        if errors:
+            print("  This tree is not usable by the pipeline:")
+            for err in errors:
+                print(f"    - {err}")
+            continue
+
+        available = _proteome_species_names(input_dir)
+        if available:
+            in_tree, in_proteomes = check_tips_match_species(
+                tree_path, sorted(available)
+            )
+            if in_proteomes:
+                sample = ", ".join(sorted(in_proteomes)[:8])
+                print(
+                    f"  Warning: {len(in_proteomes)} proteome species missing from "
+                    f"the tree: {sample}"
+                )
+            if in_tree:
+                sample = ", ".join(sorted(in_tree)[:8])
+                print(
+                    f"  Warning: {len(in_tree)} tree tips are not among your "
+                    f"proteomes: {sample}"
+                )
+            if in_tree or in_proteomes:
+                if not _prompt_yes_no("Continue with this tree anyway?", default=True):
+                    continue
+            else:
+                print(f"  Tip labels match all {len(available)} proteome species.")
+        else:
+            print(
+                f"  (No proteomes in {input_dir} yet — tip labels will be checked "
+                "against the species set at run time.)"
+            )
+
+        verified_ultra = False
+        if _prompt_yes_no(
+            "Is this tree ultrametric (time-calibrated)?", default=False
+        ):
+            verified_ultra = _verify_ultrametric(tree_path)
+
+        num_sites = None
+        if not verified_ultra:
+            num_sites = _prompt_int_optional(
+                "Number of alignment sites behind the tree's branch lengths "
+                "(for r8s) [Enter to use OrthoFinder's alignment length]"
+            )
+
+        return SpeciesTreeConfig(
+            path=str(tree_path.resolve()),
+            is_ultrametric=verified_ultra,
+            num_sites=num_sites,
+        )
 
 
 def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
@@ -454,7 +600,15 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         msa_program=msa_program,
     )
 
-    ultrametric = _prompt_calibration(Path(orthofinder.input_dir))
+    species_tree = _prompt_species_tree(Path(orthofinder.input_dir))
+    if species_tree is not None and species_tree.is_ultrametric:
+        print(
+            "\nUltrametric species tree supplied; skipping the r8s calibration "
+            "(r8s will not run)."
+        )
+        ultrametric = UltrametricConfig()
+    else:
+        ultrametric = _prompt_calibration(Path(orthofinder.input_dir))
 
     # ---- Detect conda runtime configuration ----
     print("\n=== Detecting conda runtime ===\n")
@@ -500,6 +654,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         orthofinder=orthofinder,
         runtime=runtime_config,
         ultrametric=ultrametric,
+        species_tree=species_tree,
     )
 
     # One config per execution mode, each with a mode-named output_dir sharing
@@ -535,11 +690,25 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print(f"  OrthoFinder -t:     {search_threads}")
     print(f"  OrthoFinder -a:     {analysis_threads}")
     print(f"  OrthoFinder MSA:    {msa_program}")
+    if species_tree is not None and species_tree.has_tree():
+        kind = (
+            "ultrametric (r8s skipped)"
+            if species_tree.is_ultrametric
+            else "non-ultrametric (r8s will date it)"
+        )
+        print(f"  User species tree:  {species_tree.path}")
+        print(f"                      {kind}")
+        if species_tree.num_sites is not None:
+            print(f"                      num_sites: {species_tree.num_sites}")
+    else:
+        print("  Species tree:       OrthoFinder-inferred")
     if ultrametric.has_calibration():
         print(
             f"  r8s calibration:    MRCA({ultrametric.species_a}, "
             f"{ultrametric.species_b}) = {ultrametric.divergence_my:g} Myr"
         )
+    elif species_tree is not None and species_tree.is_ultrametric:
+        print("  r8s calibration:    n/a (ultrametric tree supplied)")
     else:
         print("  r8s calibration:    none (relative-time, root-anchored)")
     if runtime_config is not None:

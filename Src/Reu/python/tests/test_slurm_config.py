@@ -14,6 +14,7 @@ from convgeno.slurm.config import (
     MultinodeConfig,
     PipelineConfig,
     SlurmConfig,
+    SpeciesTreeConfig,
     UltrametricConfig,
     normalize_optional_account,
 )
@@ -67,6 +68,67 @@ class TestUltrametricConfig:
         cfg.save(path)
         assert "ultrametric:" not in path.read_text(encoding="utf-8")
         assert PipelineConfig.load(path).ultrametric is None
+
+
+class TestSpeciesTreeConfig:
+    def test_has_tree(self):
+        assert SpeciesTreeConfig(path="/t.nwk").has_tree() is True
+        assert SpeciesTreeConfig().has_tree() is False
+
+    def test_from_dict_ignores_unknown_keys(self):
+        cfg = SpeciesTreeConfig.from_dict(
+            {"path": "/t.nwk", "is_ultrametric": True, "num_sites": 500, "next": "x"}
+        )
+        assert cfg.path == "/t.nwk"
+        assert cfg.is_ultrametric is True
+        assert cfg.num_sites == 500
+
+    def test_to_dict_omits_none_num_sites(self):
+        d = SpeciesTreeConfig(path="/t.nwk").to_dict()
+        assert d["path"] == "/t.nwk"
+        assert d["is_ultrametric"] is False
+        assert "num_sites" not in d  # None is omitted
+
+    def test_pipeline_config_round_trips_species_tree(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            species_tree=SpeciesTreeConfig(
+                path="/data/my_tree.nwk", is_ultrametric=False, num_sites=1234
+            ),
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "species_tree:" in path.read_text(encoding="utf-8")
+        loaded = PipelineConfig.load(path)
+        assert loaded.species_tree is not None
+        assert loaded.species_tree.path == "/data/my_tree.nwk"
+        assert loaded.species_tree.is_ultrametric is False
+        assert loaded.species_tree.num_sites == 1234
+
+    def test_pipeline_config_round_trips_ultrametric_tree(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            species_tree=SpeciesTreeConfig(path="/data/dated.nwk", is_ultrametric=True),
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        loaded = PipelineConfig.load(path)
+        assert loaded.species_tree is not None
+        assert loaded.species_tree.is_ultrametric is True
+        assert loaded.species_tree.num_sites is None
+
+    def test_pipeline_config_omits_when_no_tree(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            species_tree=SpeciesTreeConfig(),  # no path -> not written
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "species_tree:" not in path.read_text(encoding="utf-8")
+        assert PipelineConfig.load(path).species_tree is None
 
 
 class TestSlurmConfigFromDict:

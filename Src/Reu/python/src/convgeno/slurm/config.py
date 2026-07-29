@@ -207,6 +207,38 @@ class UltrametricConfig:
 
 
 @dataclass(frozen=True)
+class SpeciesTreeConfig:
+    """A user-supplied species tree collected by ``convgeno init``.
+
+    When ``path`` is set, this tree REPLACES the OrthoFinder-inferred species
+    tree as the source of the ultrametric ``-t`` tree the downstream steps
+    consume. ``is_ultrametric`` is ``True`` only when the tree was *verified*
+    ultrametric at ``init`` time — in which case r8s is skipped. Otherwise r8s
+    dates the tree, using ``num_sites`` when the user supplied it (the length of
+    the alignment behind the tree's branch lengths) or the OrthoFinder alignment
+    length as a fallback.
+    """
+
+    path: str | None = None
+    is_ultrametric: bool = False
+    num_sites: int | None = None
+
+    def has_tree(self) -> bool:
+        """True when a user-supplied tree path is set."""
+        return bool(self.path)
+
+    def to_dict(self) -> dict:
+        """Serialize, omitting ``None`` fields."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SpeciesTreeConfig:
+        """Construct from a dict; unknown keys ignored for forward-compat."""
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline configuration combining project paths and SLURM settings."""
 
@@ -217,6 +249,7 @@ class PipelineConfig:
     runtime: Optional[CondaRuntimeConfig] = None
     multinode: Optional[MultinodeConfig] = None
     ultrametric: UltrametricConfig | None = None
+    species_tree: SpeciesTreeConfig | None = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
@@ -233,6 +266,8 @@ class PipelineConfig:
             data["multinode"] = self.multinode.to_dict()
         if self.ultrametric is not None and self.ultrametric.has_calibration():
             data["ultrametric"] = self.ultrametric.to_dict()
+        if self.species_tree is not None and self.species_tree.has_tree():
+            data["species_tree"] = self.species_tree.to_dict()
         if self.runtime is not None:
             data.update(runtime_config_to_dict(self.runtime))
         with open(path, "w", encoding="utf-8") as f:
@@ -270,6 +305,8 @@ class PipelineConfig:
         mn_config = MultinodeConfig.from_dict(mn_dict) if mn_dict else None
         ultra_dict = data.get("ultrametric")
         ultra_config = UltrametricConfig.from_dict(ultra_dict) if ultra_dict else None
+        st_dict = data.get("species_tree")
+        st_config = SpeciesTreeConfig.from_dict(st_dict) if st_dict else None
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
@@ -278,4 +315,5 @@ class PipelineConfig:
             runtime=runtime_config,
             multinode=mn_config,
             ultrametric=ultra_config,
+            species_tree=st_config,
         )
