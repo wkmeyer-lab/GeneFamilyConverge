@@ -604,3 +604,37 @@ class TestInitUserSpeciesTree:
 
         loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
         assert loaded.species_tree is None
+
+    def test_species_tree_written_to_both_modes(self, tmp_path: Path):
+        self._proteomes(tmp_path)
+        tree = tmp_path / "dated.nwk"
+        tree.write_text("((human:47,cat:47):47,dog:94);\n", encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            str(tree),       # user species tree path
+            "y",             # is ultrametric?
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        mn = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        sn = PipelineConfig.load(_mode_config_path(output, "singlenode"))
+        for cfg in (mn, sn):
+            assert cfg.species_tree is not None
+            assert cfg.species_tree.path == str(tree.resolve())
+            assert cfg.species_tree.is_ultrametric is True
+        # The species-tree record is identical across both execution modes.
+        assert mn.species_tree == sn.species_tree
