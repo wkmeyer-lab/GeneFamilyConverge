@@ -1651,8 +1651,15 @@ def generate_resume_script(
     calibration_arg = (
         config.ultrametric.calibration_cli_arg() if config.ultrametric else None
     )
+    species_tree = config.species_tree
     ultrametric_block = render_ultrametric_autostep(
-        config.project_dir, "$FINAL_RESULTS", calibration_arg
+        config.project_dir,
+        "$FINAL_RESULTS",
+        calibration_arg,
+        user_tree=species_tree.path if species_tree else None,
+        user_tree_is_ultrametric=bool(species_tree and species_tree.is_ultrametric),
+        num_sites=species_tree.num_sites if species_tree else None,
+        species_dir=config.orthofinder.input_dir,
     )
 
     # Resolve analysis threads (-a): use the configured value, falling back

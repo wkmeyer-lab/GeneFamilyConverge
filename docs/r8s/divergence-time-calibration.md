@@ -46,7 +46,7 @@ flowchart LR
 
 Setup asks for the calibration during `convgeno init`:
 
-```
+```text
 === Species tree calibration (r8s ultrametric step) ===
 r8s scales the OrthoFinder species tree to time from ONE calibration:
 two species and their divergence time in millions of years. Name each
@@ -116,10 +116,10 @@ r8s dates **nodes**, not species. Your species pair is how you point at a node:
 the pipeline calibrates the **most recent common ancestor (MRCA)** of the two
 species you named, and fixes that node's age to your number.
 
-```
-Homo_sapiens ─┐
-              ├─ this node is fixed at 94 Myr
-Felis_catus  ─┘
+```mermaid
+flowchart LR
+    N["their common ancestor:<br/>fixed at 94 Myr"] --> A["Homo_sapiens"]
+    N --> B["Felis_catus"]
 ```
 
 Two consequences worth internalising before you choose a pair:
@@ -176,10 +176,10 @@ is altered.
 **5. It builds the r8s instructions and runs them.** The resulting file is saved
 alongside your results so you can read exactly what r8s was asked to do:
 
-```
+```text
 #NEXUS
 begin trees;
-tree nj_tree = [&R] ((Homo_sapiens:0.04021,Felis_catus:0.05130):0.01887,…);
+tree nj_tree = [&R] ((Homo_sapiens:0.04021,Felis_catus:0.05130):0.01887,...);
 End;
 begin rates;
 blformat nsites=283789 lengths=persite ultrametric=no;
@@ -211,7 +211,7 @@ longest root-to-tip paths and requiring them to agree to within 0.1% of tree
 height, so the check works the same whether your ages are in Myr or relative
 units. On success you see:
 
-```
+```text
 post-validation: tree is rooted, binary, and ultrametric.
 ```
 
@@ -236,13 +236,13 @@ of the other nodes.
 
 The run also prints a summary:
 
-```
+```text
 nsites:        283789
 calibrations:  1
-tips (12):     Bos_taurus, Canis_familiaris, Felis_catus, Homo_sapiens, …
+tips (12):     Bos_taurus, Canis_familiaris, Felis_catus, Homo_sapiens, ...
 dating:        pl (fixed smoothing=100)
-control file:  …/r8s_work/r8s_ctl_file.txt
-ultrametric tree -> …/species_tree_ultrametric.nwk
+control file:  .../r8s_work/r8s_ctl_file.txt
+ultrametric tree -> .../species_tree_ultrametric.nwk
 post-validation: tree is rooted, binary, and ultrametric.
 ```
 
@@ -260,7 +260,7 @@ your next run, with no change to the calibration you already set.
 Pressing Enter at the first species prompt skips it, and setup tells you what
 that means:
 
-```
+```text
   No calibration set: the tree will be made ultrametric in RELATIVE
   time (root-anchored). Re-run 'convgeno init' to add one later.
 ```
@@ -355,7 +355,7 @@ setup prompts, so add them there and re-run the ultrametric step.
 | `Concatenated species-tree alignment not found` | OrthoFinder ran without MSA mode, so there is no alignment to count sites from. Re-run OrthoFinder in MSA mode, or set `ultrametric.nsites` to a known value. |
 | `Alignment is not rectangular` | The species-tree alignment file is truncated or was overwritten; the OrthoFinder run needs re-checking. |
 | `r8s not installed; ultrametric step skipped.` | Expected until r8s is built — see [`tools/r8s/README.md`](../../tools/r8s/README.md). Your OrthoFinder results are complete and unaffected. |
-| `post-validation WARNINGS: … tree is not ultrametric within tolerance` | r8s returned a tree that does not date cleanly. Read `r8s_work/r8s_tmp.txt`: usually the calibration is placed on an implausible node, or the tree has too little signal to date at the chosen smoothing. |
+| `post-validation WARNINGS: ... tree is not ultrametric within tolerance` | r8s returned a tree that does not date cleanly. Read `r8s_work/r8s_tmp.txt`: usually the calibration is placed on an implausible node, or the tree has too little signal to date at the chosen smoothing. |
 | `No calibration provides a fixed age or a bounded (min+max) window` | Every calibration is one-sided, so nothing pins the scale. Give at least one `age`, or both `min_age` and `max_age`. |
 
 ---

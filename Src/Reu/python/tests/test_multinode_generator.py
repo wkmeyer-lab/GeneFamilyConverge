@@ -623,6 +623,23 @@ class TestResumeScript:
         # multi-node hands the deep, already-resolved Results dir to the step
         assert '"$FINAL_RESULTS"' in script
 
+    def test_user_ultrametric_tree_uses_assume_mode(self, sample_config):
+        import dataclasses
+
+        from convgeno.slurm.config import SpeciesTreeConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            species_tree=SpeciesTreeConfig(
+                path="/data/dated.nwk", is_ultrametric=True
+            ),
+        )
+        script = generate_resume_script(cfg)
+        assert '--input-tree "/data/dated.nwk"' in script
+        assert "--assume-ultrametric" in script
+        # r8s is not run for a verified-ultrametric tree.
+        assert "--skip-if-unavailable" not in script
+
     def test_uses_b_flag(self, sample_config):
         assert "-b " in generate_resume_script(sample_config)
 

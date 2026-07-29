@@ -35,41 +35,92 @@ __all__ = [
 
 
 def render_ultrametric_autostep(
-    project_dir: str, results_expr: str, calibration_arg: str | None = None
+    project_dir: str,
+    results_expr: str,
+    calibration_arg: str | None = None,
+    *,
+    user_tree: str | None = None,
+    user_tree_is_ultrametric: bool = False,
+    num_sites: int | None = None,
+    species_dir: str | None = None,
 ) -> str:
-    """Shell block that runs r8s on the OrthoFinder species tree after a run.
+    """Shell block that produces the ultrametric ``-t`` tree after a run.
 
     Emitted at the tail of a successful OrthoFinder job (single- or multi-node)
-    so the species tree is made ultrametric automatically. It is **non-fatal**
-    (OrthoFinder's own success is never undone by it) and **skips cleanly** when
-    r8s is not installed (``--skip-if-unavailable``).
+    so ``species_tree_ultrametric.nwk`` is produced automatically. It is
+    **non-fatal** (OrthoFinder's own success is never undone by it) and, when it
+    runs r8s, **skips cleanly** if r8s is not installed (``--skip-if-unavailable``).
 
     *results_expr* is the shell expression pointing at the OrthoFinder output or
     Results directory — ``$OUTPUT_DIR`` for single-node (results at
     ``$OUTPUT_DIR/Results_*``), ``$FINAL_RESULTS`` for multi-node (the deep
     ``$WORK_DIR/OrthoFinder/Results_*`` the resume script already resolves).
-    ``make_tree_ultrametric.py`` handles either depth.
+    ``make_tree_ultrametric.py`` handles either depth. It is only emitted when
+    OrthoFinder output is actually needed (see below).
 
     *calibration_arg* is a ``make_tree_ultrametric.py --calibration`` value
     (``NAME:SP1,SP2:AGE``) from ``convgeno init``. When given, r8s scales the
     tree to real time; when ``None``, the root is anchored (relative time).
+
+    User-supplied species tree (``convgeno init``'s ``species_tree`` block):
+
+    - ``user_tree`` set + ``user_tree_is_ultrametric`` → the tree is taken as-is
+      (``--assume-ultrametric``): validated and copied, **no r8s**, and no
+      OrthoFinder output is read.
+    - ``user_tree`` set, not ultrametric, ``num_sites`` given → r8s dates the
+      user tree with that ``--nsites``; **no** OrthoFinder output is read.
+    - ``user_tree`` set, not ultrametric, no ``num_sites`` → r8s dates the user
+      tree but reads OrthoFinder's alignment (``results_expr``) for ``nsites``.
+    - ``user_tree`` unset → r8s dates OrthoFinder's own ``SpeciesTree_rooted.txt``.
+
+    *species_dir* (the proteome input dir) is passed as ``--species-dir`` for a
+    user tree so its tips are re-checked against the species set at run time.
     """
+    has_user_tree = bool(user_tree)
+    # r8s runs unless a verified-ultrametric user tree was supplied.
+    runs_r8s = not (has_user_tree and user_tree_is_ultrametric)
+    # OrthoFinder output is needed to discover the tree (no user tree) or to
+    # derive nsites (user tree without an explicit num_sites).
+    needs_results = runs_r8s and (not has_user_tree or num_sites is None)
+
+    args: list[str] = []
+    if needs_results:
+        args.append(f'"{results_expr}"')
+    if has_user_tree:
+        args.append(f'--input-tree "{user_tree}"')
+        if user_tree_is_ultrametric:
+            args.append("--assume-ultrametric")
+        elif num_sites is not None:
+            args.append(f"--nsites {num_sites}")
+    args.append('-o "$OUTPUT_DIR/species_tree_ultrametric.nwk"')
+    if runs_r8s:
+        args.append(
+            f'--calibration "{calibration_arg}"' if calibration_arg else "--root-age 1"
+        )
+    if has_user_tree and species_dir:
+        args.append(f'--species-dir "{species_dir}"')
+    if runs_r8s:
+        args.append("--skip-if-unavailable")
+
     script = f"{project_dir}/Src/Loc/scripts/make_tree_ultrametric.py"
-    cmd_lines = [
-        f'python "{script}" \\',
-        f'    "{results_expr}" \\',
-        '    -o "$OUTPUT_DIR/species_tree_ultrametric.nwk" \\',
-    ]
-    if calibration_arg:
-        cmd_lines.append(f'    --calibration "{calibration_arg}" \\')
+    command = " \\\n".join([f'python "{script}"'] + [f"    {a}" for a in args])
+
+    if runs_r8s:
+        setup = (
+            'echo "Attempting automatic ultrametric conversion of the species '
+            'tree (r8s)..."\n'
+            'export PATH="$HOME/.local/bin:$PATH"   '
+            "# r8s from tools/r8s/install_r8s.sh installs here"
+        )
     else:
-        cmd_lines.append("    --root-age 1 \\")
-    cmd_lines.append("    --skip-if-unavailable")
-    command = "\n".join(cmd_lines)
+        setup = (
+            'echo "Installing the user-supplied ultrametric species tree '
+            '(validate + copy; no r8s)..."'
+        )
+
     return f'''\
 # ---- convgeno: auto ultrametric step (r8s; optional, non-fatal) ----
-echo "Attempting automatic ultrametric conversion of the species tree (r8s)..."
-export PATH="$HOME/.local/bin:$PATH"   # r8s from tools/r8s/install_r8s.sh installs here
+{setup}
 set +e
 {command}
 CONVGENO_R8S_STATUS=$?

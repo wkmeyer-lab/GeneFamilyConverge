@@ -79,6 +79,48 @@ class TestUltrametricAutostep:
         assert "--root-age 1" in script
         assert "--calibration" not in script
 
+    def test_user_ultrametric_tree_uses_assume_mode(self, sample_config):
+        import dataclasses
+
+        from convgeno.slurm.config import SpeciesTreeConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            species_tree=SpeciesTreeConfig(
+                path="/data/dated.nwk", is_ultrametric=True
+            ),
+        )
+        script = generate_orthofinder_script(cfg)
+        assert '--input-tree "/data/dated.nwk"' in script
+        assert "--assume-ultrametric" in script
+        # r8s is not run for a verified-ultrametric tree.
+        assert "--skip-if-unavailable" not in script
+        assert "--root-age" not in script
+        # The proteome dir is passed for the run-time tip check.
+        assert (
+            '--species-dir "/share/ceph/project/Data/interim/cleaned_proteomes"'
+            in script
+        )
+
+    def test_user_nonultrametric_tree_with_nsites_skips_orthofinder(
+        self, sample_config
+    ):
+        import dataclasses
+
+        from convgeno.slurm.config import SpeciesTreeConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            species_tree=SpeciesTreeConfig(
+                path="/data/user.nwk", is_ultrametric=False, num_sites=1234
+            ),
+        )
+        script = generate_orthofinder_script(cfg)
+        assert '--input-tree "/data/user.nwk"' in script
+        assert "--nsites 1234" in script
+        assert "--skip-if-unavailable" in script
+        assert "--assume-ultrametric" not in script
+
     def test_single_node_script_is_valid_bash(self, sample_config, tmp_path: Path):
         import shutil
         import subprocess
