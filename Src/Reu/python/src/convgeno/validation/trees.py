@@ -19,7 +19,13 @@ from Bio import Phylo
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["validate_tree", "check_tips_match_species", "is_ultrametric"]
+__all__ = [
+    "validate_tree",
+    "check_tips_match_species",
+    "is_ultrametric",
+    "root_to_tip_depths",
+    "ultrametric_deviation",
+]
 
 
 def _load_tree(source: Path | str):
@@ -100,6 +106,28 @@ def check_tips_match_species(
     tips = {tip.name for tip in tree.get_terminals()}
     species = set(species_list)
     return (tips - species, species - tips)
+
+
+def root_to_tip_depths(tree_path: Path | str) -> dict[str, float]:
+    """Map each tip label to its root-to-tip distance (sum of branch lengths).
+
+    Reuses the same ``Bio.Phylo`` loading as the other validators. Useful for
+    *reporting* why a tree is or isn't ultrametric (equal depths == ultrametric).
+    """
+    tree = _load_tree(tree_path)
+    return {clade.name: depth for clade, depth in _tip_depths(tree).items()}
+
+
+def ultrametric_deviation(tree_path: Path | str) -> float:
+    """Return ``max_depth - min_depth`` across all root-to-tip paths.
+
+    ``0.0`` for a perfectly ultrametric tree; larger values mean the tips are
+    increasingly out of alignment. Returns ``0.0`` for a tree with no tips.
+    """
+    depths = list(_tip_depths(_load_tree(tree_path)).values())
+    if not depths:
+        return 0.0
+    return max(depths) - min(depths)
 
 
 def is_ultrametric(tree_path: Path | str, tolerance: float = 1e-3) -> bool:

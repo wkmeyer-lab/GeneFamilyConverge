@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from convgeno.validation.trees import (
     check_tips_match_species,
     is_ultrametric,
+    root_to_tip_depths,
+    ultrametric_deviation,
     validate_tree,
 )
 
@@ -48,6 +52,30 @@ class TestIsUltrametric:
         assert is_ultrametric("((a:47,b:47):47,c:94.01);") is True
         # A gross deviation is not.
         assert is_ultrametric("((a:47,b:47):47,c:150);") is False
+
+
+class TestRootToTipDepths:
+    def test_equal_depths_for_ultrametric(self, ultrametric_tree_file: Path):
+        depths = root_to_tip_depths(ultrametric_tree_file)
+        assert set(depths) == {"human", "cat", "dog"}
+        assert max(depths.values()) - min(depths.values()) == pytest.approx(0.0)
+
+    def test_unequal_depths_for_additive(self, species_tree_file: Path):
+        depths = root_to_tip_depths(species_tree_file)
+        assert set(depths) == {"human", "cat", "dog"}
+        assert max(depths.values()) - min(depths.values()) > 0
+
+
+class TestUltrametricDeviation:
+    def test_zero_for_ultrametric(self, ultrametric_tree_file: Path):
+        assert ultrametric_deviation(ultrametric_tree_file) == pytest.approx(0.0)
+
+    def test_positive_for_additive(self, species_tree_file: Path):
+        assert ultrametric_deviation(species_tree_file) > 0
+
+    def test_via_newick_string(self):
+        assert ultrametric_deviation("((a:47,b:47):47,c:94);") == pytest.approx(0.0)
+        assert ultrametric_deviation("((a:47,b:47):47,c:150);") == pytest.approx(56.0)
 
 
 class TestCheckTipsMatchSpecies:

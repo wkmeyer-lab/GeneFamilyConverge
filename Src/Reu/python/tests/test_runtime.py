@@ -17,6 +17,7 @@ from convgeno.slurm.runtime import (
     detect_conda_runtime,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_ultrametric_autostep,
     runtime_config_from_dict,
     runtime_config_to_dict,
 )
@@ -302,3 +303,72 @@ class TestMafftMsaShim:
     def test_passes_through_non_alignment_calls(self):
         # version / dependency-test invocations exec the real mafft unchanged
         assert 'exec "$REAL" "$@"' in render_mafft_msa_shim()
+
+
+class TestRenderUltrametricAutostep:
+    def test_default_discovers_orthofinder_tree(self):
+        block = render_ultrametric_autostep("/proj", "$OUTPUT_DIR")
+        assert "/proj/Src/Loc/scripts/make_tree_ultrametric.py" in block
+        assert '"$OUTPUT_DIR"' in block  # results dir passed for discovery
+        assert "species_tree_ultrametric.nwk" in block
+        assert "--root-age 1" in block
+        assert "--skip-if-unavailable" in block
+        assert "--input-tree" not in block
+        assert "--assume-ultrametric" not in block
+
+    def test_calibration_replaces_root_anchor(self):
+        block = render_ultrametric_autostep(
+            "/proj", "$OUTPUT_DIR", "hc:human,cat:94"
+        )
+        assert '--calibration "hc:human,cat:94"' in block
+        assert "--root-age" not in block
+
+    def test_ultrametric_user_tree_skips_r8s_and_orthofinder(self):
+        block = render_ultrametric_autostep(
+            "/proj",
+            "$OUTPUT_DIR",
+            user_tree="/data/dated.nwk",
+            user_tree_is_ultrametric=True,
+            species_dir="/data/proteomes",
+        )
+        assert '--input-tree "/data/dated.nwk"' in block
+        assert "--assume-ultrametric" in block
+        assert '--species-dir "/data/proteomes"' in block
+        # No r8s => no calibration/anchor, no skip flag, and no results dir read.
+        assert "--root-age" not in block
+        assert "--calibration" not in block
+        assert "--skip-if-unavailable" not in block
+        assert '"$OUTPUT_DIR"' not in block  # OrthoFinder output not read
+        assert "no r8s" in block  # setup message reflects the skip
+
+    def test_nonultrametric_user_tree_with_nsites_skips_orthofinder(self):
+        block = render_ultrametric_autostep(
+            "/proj",
+            "$OUTPUT_DIR",
+            "hc:human,cat:94",
+            user_tree="/data/user.nwk",
+            user_tree_is_ultrametric=False,
+            num_sites=321,
+            species_dir="/data/proteomes",
+        )
+        assert '--input-tree "/data/user.nwk"' in block
+        assert "--nsites 321" in block
+        assert '--calibration "hc:human,cat:94"' in block
+        assert "--skip-if-unavailable" in block
+        assert "--assume-ultrametric" not in block
+        assert '"$OUTPUT_DIR"' not in block  # nsites given => no OF output needed
+
+    def test_nonultrametric_user_tree_without_nsites_reads_orthofinder(self):
+        block = render_ultrametric_autostep(
+            "/proj",
+            "$FINAL_RESULTS",
+            user_tree="/data/user.nwk",
+            user_tree_is_ultrametric=False,
+            num_sites=None,
+            species_dir="/data/proteomes",
+        )
+        assert '--input-tree "/data/user.nwk"' in block
+        assert '"$FINAL_RESULTS"' in block  # results dir read for nsites
+        assert "--nsites" not in block
+        assert "--root-age 1" in block
+        assert "--skip-if-unavailable" in block

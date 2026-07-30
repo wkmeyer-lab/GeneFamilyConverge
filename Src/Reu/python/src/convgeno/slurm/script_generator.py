@@ -10,6 +10,7 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_ultrametric_autostep,
 )
 
 
@@ -213,6 +214,22 @@ echo "This is persistent scratch and will be removed by the cluster's purge poli
     # MAFFT MSA shim: force the fast, robust mafft command (+ retry) instead of
     # the L-INS-i default that stalls / emits empty alignments on moderate OGs.
     mafft_shim = render_mafft_msa_shim()
+    # Auto ultrametric step: single-node results live at $OUTPUT_DIR/Results_*.
+    # Use the init-time calibration if one was configured, else root-anchor. A
+    # user-supplied species tree (config.species_tree) redirects/skips r8s.
+    calibration_arg = (
+        config.ultrametric.calibration_cli_arg() if config.ultrametric else None
+    )
+    species_tree = config.species_tree
+    ultrametric_block = render_ultrametric_autostep(
+        config.project_dir,
+        "$OUTPUT_DIR",
+        calibration_arg,
+        user_tree=species_tree.path if species_tree else None,
+        user_tree_is_ultrametric=bool(species_tree and species_tree.is_ultrametric),
+        num_sites=species_tree.num_sites if species_tree else None,
+        species_dir=config.orthofinder.input_dir,
+    )
 
     script = f"""\
 #!/bin/bash
@@ -336,6 +353,7 @@ fi
 
 echo "OrthoFinder completed successfully."
 {scratch_cleanup_block}
+{ultrametric_block}
 exit 0
 """
     return script

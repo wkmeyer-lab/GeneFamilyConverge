@@ -615,6 +615,31 @@ class TestResumeScript:
     def test_job_name(self, sample_config):
         assert "--job-name=convgeno_of_resume" in generate_resume_script(sample_config)
 
+    def test_includes_ultrametric_autostep_on_final_results(self, sample_config):
+        script = generate_resume_script(sample_config)
+        assert "/Src/Loc/scripts/make_tree_ultrametric.py" in script
+        assert "--skip-if-unavailable" in script
+        assert "species_tree_ultrametric.nwk" in script
+        # multi-node hands the deep, already-resolved Results dir to the step
+        assert '"$FINAL_RESULTS"' in script
+
+    def test_user_ultrametric_tree_uses_assume_mode(self, sample_config):
+        import dataclasses
+
+        from convgeno.slurm.config import SpeciesTreeConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            species_tree=SpeciesTreeConfig(
+                path="/data/dated.nwk", is_ultrametric=True
+            ),
+        )
+        script = generate_resume_script(cfg)
+        assert '--input-tree "/data/dated.nwk"' in script
+        assert "--assume-ultrametric" in script
+        # r8s is not run for a verified-ultrametric tree.
+        assert "--skip-if-unavailable" not in script
+
     def test_uses_b_flag(self, sample_config):
         assert "-b " in generate_resume_script(sample_config)
 

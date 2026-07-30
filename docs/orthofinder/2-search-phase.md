@@ -43,10 +43,9 @@ Every quantity below derives from the **proteome sizes**. Let `|Sᵢ|` be the by
 size of `Species{i}.fa` in the `WorkingDirectory`. The estimated cost of the
 search of species `i` (query) against species `j` (database) is:
 
-```
+```text
 cost(i, j) = |Sᵢ| · |Sⱼ|
 ```
-SLURM ARRAY
 
 This is a proxy for `diamond blastp` runtime: both the query volume and the
 database volume drive the alignment work, so self-pairs and large×large pairs are
@@ -69,7 +68,7 @@ auto-derived.
 
 ### C — cores per task
 
-```
+```text
 C = min( ⌊max_cpus_per_node / 3⌋ , min_cpus_per_node − 1 ),   clamped to ≥ 1
 ```
 
@@ -79,7 +78,7 @@ biggest node 52, smallest 15 → `min(17, 14) = 14`.
 
 ### W — concurrency (the array throttle)
 
-```
+```text
 W = min( configured default (12) , QOS MaxJobs ),   clamped to ≥ 1
 ```
 
@@ -90,7 +89,7 @@ regardless).
 
 ### K — waves
 
-```
+```text
 K = configured default (4)
 ```
 
@@ -98,7 +97,7 @@ K = configured default (4)
 
 ### T — number of tasks / buckets
 
-```
+```text
 T = min( K·W , n² , MaxArraySize ),   clamped to ≥ 1
 ```
 
@@ -112,7 +111,7 @@ Each emitted `diamond blastp` command uses `p` threads (the `-p` value, expected
 to be `1`). A task keeps all `C` cores busy by running `C/p` commands at the same
 time:
 
-```
+```text
 within_task_concurrency = ⌊C / p⌋,   clamped to ≥ 1
 ```
 
@@ -136,7 +135,7 @@ makespan-minimisation problem, solved with the greedy **Longest-Processing-Time
 Because the largest commands are placed first and always land in the emptiest
 bucket, the buckets end up near-equal in total cost. LPT carries Graham's bound:
 
-```
+```text
 makespan ≤ ( 4/3 − 1/(3T) ) · OPT
 ```
 
@@ -164,7 +163,7 @@ Both are derived from the LPT by-products. Values can be overridden in
 A task keeps all `C` cores busy, so it burns cost at `C · throughput_const`
 cost-units per second:
 
-```
+```text
 seconds = ⌈ max_bucket_cost / (C · throughput_const) · margin ⌉
 ```
 
@@ -186,7 +185,7 @@ to the configured job walltime.
 
 `C/p` databases are loaded concurrently, so:
 
-```
+```text
 per_command_MB = max( largest_DB_MB · db_safety , per_command_floor_MB )
 mem_MB         = (C/p) · per_command_MB + base_MB
 ```
@@ -222,7 +221,7 @@ WorkingDirectory, the kit does the following:
    (the same cost model the generator uses) and report the cost-weighted
    aggregate:
 
-   ```
+   ```text
    throughput_const = Σ cost / Σ elapsed_seconds     (bytes² per core-second)
    ```
 

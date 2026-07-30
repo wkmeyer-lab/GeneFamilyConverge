@@ -98,7 +98,7 @@ creates only `OUTPUT_PARENT` and aborts if `OUTPUT_DIR` already exists.
 
 ### 4. Run OrthoFinder prepare (`-op`)
 
-```
+```bash
 orthofinder -f "$INPUT_DIR" -o "$OF_WORK_ROOT" -op -S "$SEARCH_PROGRAM"
 ```
 
@@ -172,7 +172,7 @@ Let `n` = the number of species (the count of active `id:` lines in
 `SpeciesIDs.txt`). An all-vs-all search over `n` species is every ordered pair
 including self-pairs, so there must be exactly:
 
-```
+```text
 expected_searches = n²
 ```
 
@@ -199,7 +199,7 @@ top-level database files are present.)
 Finally the job partitions the `n²` search commands into `T` cost-balanced
 buckets and writes one manifest file per array task:
 
-```
+```bash
 python -m convgeno.slurm.build_search_manifest \
     --search-commands "<RUN_NAME>_search_commands.txt" \
     --work-dir       "$WORK_DIR" \
