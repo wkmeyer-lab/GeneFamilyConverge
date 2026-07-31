@@ -239,6 +239,40 @@ class SpeciesTreeConfig:
 
 
 @dataclass(frozen=True)
+class PhenotypeTreeConfig:
+    """Phenotype tip data for the automatic categorical phenotype tree (CAFE -y).
+
+    Collected by ``convgeno init``. When ``table`` is set, an automatic step runs
+    at the tail of the OrthoFinder job — right after the r8s ultrametric step —
+    and reconstructs a categorical phenotype tree on the ultrametric species tree,
+    writing ``lambda_tree.nwk`` (the CAFE-5 ``-y`` multi-lambda tree) beside it.
+
+    ``table`` is a TSV whose ``id_col`` column holds tip labels (= proteome
+    basenames / OrthoFinder tips) and ``pheno_col`` holds the phenotype category.
+    ``model`` is the ancestral-state-reconstruction rate model (``ER``/``SYM``/``ARD``).
+    """
+
+    table: str | None = None
+    id_col: str = "species"
+    pheno_col: str = "phenotype"
+    model: str = "ER"
+
+    def has_table(self) -> bool:
+        """True when a phenotype table path is set."""
+        return bool(self.table)
+
+    def to_dict(self) -> dict:
+        """Serialize, omitting ``None`` fields."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PhenotypeTreeConfig:
+        """Construct from a dict; unknown keys ignored for forward-compat."""
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline configuration combining project paths and SLURM settings."""
 
@@ -250,6 +284,7 @@ class PipelineConfig:
     multinode: Optional[MultinodeConfig] = None
     ultrametric: UltrametricConfig | None = None
     species_tree: SpeciesTreeConfig | None = None
+    phenotype_tree: PhenotypeTreeConfig | None = None
 
     def save(self, path: Path | str) -> None:
         """Write the configuration to a human-readable YAML file."""
@@ -268,6 +303,8 @@ class PipelineConfig:
             data["ultrametric"] = self.ultrametric.to_dict()
         if self.species_tree is not None and self.species_tree.has_tree():
             data["species_tree"] = self.species_tree.to_dict()
+        if self.phenotype_tree is not None and self.phenotype_tree.has_table():
+            data["phenotype_tree"] = self.phenotype_tree.to_dict()
         if self.runtime is not None:
             data.update(runtime_config_to_dict(self.runtime))
         with open(path, "w", encoding="utf-8") as f:
@@ -307,6 +344,8 @@ class PipelineConfig:
         ultra_config = UltrametricConfig.from_dict(ultra_dict) if ultra_dict else None
         st_dict = data.get("species_tree")
         st_config = SpeciesTreeConfig.from_dict(st_dict) if st_dict else None
+        pt_dict = data.get("phenotype_tree")
+        pt_config = PhenotypeTreeConfig.from_dict(pt_dict) if pt_dict else None
         return cls(
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
@@ -316,4 +355,5 @@ class PipelineConfig:
             multinode=mn_config,
             ultrametric=ultra_config,
             species_tree=st_config,
+            phenotype_tree=pt_config,
         )

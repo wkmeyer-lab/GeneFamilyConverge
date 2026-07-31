@@ -17,6 +17,7 @@ from convgeno.slurm.runtime import (
     detect_conda_runtime,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_phenotype_tree_autostep,
     render_ultrametric_autostep,
     runtime_config_from_dict,
     runtime_config_to_dict,
@@ -372,3 +373,40 @@ class TestRenderUltrametricAutostep:
         assert "--nsites" not in block
         assert "--root-age 1" in block
         assert "--skip-if-unavailable" in block
+
+
+class TestRenderPhenotypeTreeAutostep:
+    def test_emits_rscript_and_output_paths(self):
+        block = render_phenotype_tree_autostep(
+            "/proj", phenotype_table="/data/phen.tsv"
+        )
+        assert "/proj/Src/Loc/scripts/make_categorical_phenotype_tree.R" in block
+        assert '--tree "$OUTPUT_DIR/species_tree_ultrametric.nwk"' in block
+        assert '--phenotypes "/data/phen.tsv"' in block
+        assert '--out "$OUTPUT_DIR/lambda_tree.nwk"' in block
+        assert '--legend "$OUTPUT_DIR/lambda_legend.tsv"' in block
+        assert '--id-col "species"' in block
+        assert '--pheno-col "phenotype"' in block
+        assert '--model "ER"' in block
+        assert '--reu-dir "/proj/Src/Reu/r"' in block
+
+    def test_non_fatal_and_skips_cleanly(self):
+        block = render_phenotype_tree_autostep(
+            "/proj", phenotype_table="/data/phen.tsv"
+        )
+        assert "command -v Rscript" in block  # skip if R absent
+        assert "species_tree_ultrametric.nwk" in block  # skip if no tree
+        assert "non-fatal" in block
+        assert "set +e" in block and "set -e" in block
+
+    def test_custom_columns_and_model(self):
+        block = render_phenotype_tree_autostep(
+            "/proj",
+            phenotype_table="/d/p.tsv",
+            id_col="Accession",
+            pheno_col="Diet",
+            model="ARD",
+        )
+        assert '--id-col "Accession"' in block
+        assert '--pheno-col "Diet"' in block
+        assert '--model "ARD"' in block

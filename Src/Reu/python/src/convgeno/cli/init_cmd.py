@@ -10,6 +10,7 @@ from pathlib import Path
 from convgeno.external.config import OrthoFinderConfig
 from convgeno.io.fasta import FASTA_EXTENSIONS
 from convgeno.slurm.config import (
+    PhenotypeTreeConfig,
     PipelineConfig,
     SlurmConfig,
     SpeciesTreeConfig,
@@ -323,6 +324,111 @@ def _prompt_species_tree(input_dir: Path) -> SpeciesTreeConfig | None:
         )
 
 
+def _read_tsv_column(path: Path, column: str) -> set[str]:
+    """Return the set of non-empty values in a named TSV column (best-effort)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    if not lines:
+        return set()
+    header = lines[0].split("\t")
+    if column not in header:
+        return set()
+    idx = header.index(column)
+    values: set[str] = set()
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if idx < len(cells):
+            value = cells[idx].strip()
+            if value:
+                values.add(value)
+    return values
+
+
+def _prompt_phenotype_tree(input_dir: Path) -> PhenotypeTreeConfig | None:
+    """Prompt for an optional phenotype table for the automatic CAFE -y tree.
+
+    Returns ``None`` when the user declines (no phenotype tree is built).
+    Otherwise the TSV is checked to exist and to hold the id/phenotype columns,
+    and — when proteomes are already staged — phenotype coverage of the species
+    set is reported. Pressing Enter at the first prompt skips the feature.
+    """
+    print(
+        "\n=== Phenotype tip data (optional: automatic categorical phenotype tree) ==="
+    )
+    print(
+        "Provide a phenotype table and the pipeline will AUTOMATICALLY build the\n"
+        "categorical phenotype tree (the CAFE -y multi-lambda tree) right after the\n"
+        "species tree is made ultrametric. The table is a TSV with a column of tip\n"
+        "labels (= proteome filenames, no extension) and a phenotype column."
+    )
+    while True:
+        path_str = _prompt_optional(
+            "Path to your phenotype table (TSV) [Enter to skip]"
+        )
+        if path_str is None:
+            return None
+
+        table_path = Path(path_str).expanduser()
+        if not table_path.is_file():
+            print(f"  File not found: {table_path}")
+            continue
+
+        try:
+            first_line = table_path.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, IndexError):
+            print(f"  Could not read a header row from {table_path}")
+            continue
+        columns = first_line.rstrip("\n").split("\t")
+        if len(columns) < 2:
+            print(
+                "  This does not look tab-separated (< 2 columns in the header). "
+                "Provide a TSV."
+            )
+            continue
+
+        id_col = _prompt("Tip-label column name", default="species")
+        pheno_col = _prompt("Phenotype column name", default="phenotype")
+        missing_cols = [c for c in (id_col, pheno_col) if c not in columns]
+        if missing_cols:
+            print(
+                f"  Column(s) not in the table header: {', '.join(missing_cols)}\n"
+                f"  Available columns: {', '.join(columns)}"
+            )
+            if not _prompt_yes_no("Use this table anyway?", default=False):
+                continue
+
+        available = _proteome_species_names(input_dir)
+        if available and id_col in columns:
+            labelled = _read_tsv_column(table_path, id_col)
+            covered = available & labelled
+            missing = available - labelled
+            print(
+                f"  {len(covered)}/{len(available)} proteome species have a "
+                "phenotype in this table."
+            )
+            if missing:
+                sample = ", ".join(sorted(missing)[:8])
+                print(
+                    f"  {len(missing)} without one (they will get a 'background' "
+                    f"class): {sample}"
+                )
+
+        model = _prompt("ASR rate model — ER, SYM, or ARD", default="ER")
+        model = model.strip().upper()
+        if model not in {"ER", "SYM", "ARD"}:
+            print(f"  Unrecognized model '{model}'; using ER.")
+            model = "ER"
+
+        return PhenotypeTreeConfig(
+            table=str(table_path.resolve()),
+            id_col=id_col,
+            pheno_col=pheno_col,
+            model=model,
+        )
+
+
 def _derive_orthofinder_threads(recommended_physical: int) -> tuple[int, int]:
     """Derive OrthoFinder search and analysis thread counts."""
     if recommended_physical <= 0:
@@ -610,6 +716,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     else:
         ultrametric = _prompt_calibration(Path(orthofinder.input_dir))
 
+    phenotype_tree = _prompt_phenotype_tree(Path(orthofinder.input_dir))
+
     # ---- Detect conda runtime configuration ----
     print("\n=== Detecting conda runtime ===\n")
     try:
@@ -655,6 +763,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         runtime=runtime_config,
         ultrametric=ultrametric,
         species_tree=species_tree,
+        phenotype_tree=phenotype_tree,
     )
 
     # One config per execution mode, each with a mode-named output_dir sharing
@@ -711,6 +820,14 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print("  r8s calibration:    n/a (ultrametric tree supplied)")
     else:
         print("  r8s calibration:    none (relative-time, root-anchored)")
+    if phenotype_tree is not None and phenotype_tree.has_table():
+        print(f"  Phenotype tree:     auto CAFE -y from {phenotype_tree.table}")
+        print(
+            f"                      cols {phenotype_tree.id_col} -> "
+            f"{phenotype_tree.pheno_col}, model {phenotype_tree.model}"
+        )
+    else:
+        print("  Phenotype tree:     none (no phenotype table given)")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")

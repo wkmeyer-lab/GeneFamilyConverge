@@ -29,6 +29,7 @@ __all__ = [
     "render_conda_bootstrap",
     "render_mafft_msa_shim",
     "render_ultrametric_autostep",
+    "render_phenotype_tree_autostep",
     "runtime_config_to_dict",
     "runtime_config_from_dict",
 ]
@@ -127,6 +128,64 @@ CONVGENO_R8S_STATUS=$?
 set -e
 if [ "$CONVGENO_R8S_STATUS" -ne 0 ]; then
     echo "WARNING: ultrametric step returned $CONVGENO_R8S_STATUS (non-fatal)."
+fi'''
+
+
+def render_phenotype_tree_autostep(
+    project_dir: str,
+    *,
+    phenotype_table: str,
+    id_col: str = "species",
+    pheno_col: str = "phenotype",
+    model: str = "ER",
+) -> str:
+    """Shell block that builds the categorical phenotype tree (CAFE ``-y``).
+
+    Emitted at the tail of a successful OrthoFinder job, immediately AFTER the
+    ultrametric autostep, so the CAFE ``-y`` multi-lambda tree is produced
+    automatically as soon as the ultrametric ``-t`` tree and the phenotype tip
+    data exist. It reconstructs ancestral phenotype states on
+    ``$OUTPUT_DIR/species_tree_ultrametric.nwk`` (the r8s output) and writes
+    ``$OUTPUT_DIR/lambda_tree.nwk`` (+ ``lambda_legend.tsv``) beside it.
+
+    Like the r8s step it is **non-fatal** (OrthoFinder's success is never undone)
+    and **skips cleanly** when it cannot run: no ``Rscript`` on PATH (R + the
+    ``tools/r-deps`` packages absent), no ultrametric tree yet, or the phenotype
+    table missing. It is only emitted when a phenotype table was configured at
+    ``convgeno init`` (``PhenotypeTreeConfig``). The script is invoked with
+    explicit flags — no config file is read at run time — so the generated SLURM
+    script stays fully self-contained.
+    """
+    script = f"{project_dir}/Src/Loc/scripts/make_categorical_phenotype_tree.R"
+    args = [
+        '--tree "$OUTPUT_DIR/species_tree_ultrametric.nwk"',
+        f'--phenotypes "{phenotype_table}"',
+        f'--id-col "{id_col}"',
+        f'--pheno-col "{pheno_col}"',
+        f'--model "{model}"',
+        '--out "$OUTPUT_DIR/lambda_tree.nwk"',
+        '--legend "$OUTPUT_DIR/lambda_legend.tsv"',
+        f'--reu-dir "{project_dir}/Src/Reu/r"',
+    ]
+    command = " \\\n".join([f'Rscript "{script}"'] + [f"    {a}" for a in args])
+
+    return f'''\
+# ---- convgeno: auto categorical phenotype tree (CAFE -y; optional, non-fatal) ----
+echo "Attempting automatic categorical phenotype tree (CAFE -y)..."
+if ! command -v Rscript >/dev/null 2>&1; then
+    echo "WARNING: Rscript not found; skipping phenotype tree (need R + tools/r-deps)."
+elif [ ! -s "$OUTPUT_DIR/species_tree_ultrametric.nwk" ]; then
+    echo "WARNING: no ultrametric tree; skipping phenotype tree."
+elif [ ! -f "{phenotype_table}" ]; then
+    echo "WARNING: phenotype table not found; skipping phenotype tree."
+else
+    set +e
+    {command}
+    CONVGENO_PHENO_STATUS=$?
+    set -e
+    if [ "$CONVGENO_PHENO_STATUS" -ne 0 ]; then
+        echo "WARNING: phenotype tree step exit $CONVGENO_PHENO_STATUS (non-fatal)."
+    fi
 fi'''
 
 
