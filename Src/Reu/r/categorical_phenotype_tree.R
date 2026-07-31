@@ -16,8 +16,9 @@
 # --------------------------------------------------
 # The Meyer-lab RERconverge function char2TreeCategorical() is the natural
 # reuse target, and this file DOES reuse its ancestral-state-reconstruction
-# engine, RERconverge::getAncLiks() (char2TreeCategorical calls exactly the same
-# routine internally). But char2TreeCategorical() ends with unroot(), returning
+# engine, getAncLiks() -- vendored into Src/Reu/r/anc_recon.R so no RERconverge
+# install is needed (char2TreeCategorical calls exactly the same routine
+# internally). But char2TreeCategorical() ends with unroot(), returning
 # an UNROOTED tree (basal trifurcation). CAFE-5 requires a ROOTED, strictly
 # binary "-y" tree whose topology is identical to the ultrametric "-t" species
 # tree. So we run getAncLiks() on the rooted "-t" tree and assign the integer
@@ -25,7 +26,10 @@
 # node-for-node identical (differing only in the branch-length slot).
 #
 # DEPENDENCIES (must be available in the R environment; none are hard-coded paths)
-#   - RERconverge  : getAncLiks() (which itself pulls castor::fit_mk, phangorn, expm)
+#   - getAncLiks() : the ASR engine. By default the VENDORED copy in
+#                    Src/Reu/r/anc_recon.R (deps: castor + expm; NO RERconverge),
+#                    which the caller sources. .cpt_get_anc_liks() falls back to
+#                    RERconverge::getAncLiks() only if that package is installed.
 #   - ape          : read.tree / write.tree / drop.tip / phylo handling
 #   - categoricalDropTip() from CategoricalDropTip.R -- ONLY for
 #     prune_categorical_phenotype_tree(); the CALLER sources that file (kept out
@@ -44,21 +48,21 @@
   }
 }
 
-# Resolve getAncLiks whether RERconverge is installed-and-attached or its
-# functions were source()d into the global environment.
+# Resolve getAncLiks: prefer a vendored/sourced copy in the calling environment
+# (Src/Reu/r/anc_recon.R), then fall back to an installed RERconverge.
 .cpt_get_anc_liks <- function() {
+  if (exists("getAncLiks", mode = "function")) {
+    return(get("getAncLiks", mode = "function"))
+  }
   if (requireNamespace("RERconverge", quietly = TRUE)) {
     ns <- asNamespace("RERconverge")
     if (exists("getAncLiks", envir = ns, inherits = FALSE)) {
       return(get("getAncLiks", envir = ns))
     }
   }
-  if (exists("getAncLiks", mode = "function")) {
-    return(get("getAncLiks", mode = "function"))
-  }
   stop(
-    "getAncLiks() not found. Install/attach RERconverge, or source the lab's ",
-    "RERConvergeFunctions.R so getAncLiks() is available.",
+    "getAncLiks() not found. Source Src/Reu/r/anc_recon.R (the vendored engine), ",
+    "or install RERconverge / source the lab's RERConvergeFunctions.R.",
     call. = FALSE
   )
 }
