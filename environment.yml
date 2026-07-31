@@ -25,6 +25,18 @@ dependencies:
   - fastme
   - mafft
 
+  # --- R stack for the categorical phenotype tree (CAFE -y) step ---
+  # All on conda-forge, so R lives IN this env (unlike r8s below): a single
+  # `conda activate convgeno` then provides OrthoFinder AND the R phenotype-tree
+  # step, so the automatic post-OrthoFinder step runs end-to-end with no extra
+  # setup. See tools/r-deps/ for installing these into an external/module R
+  # instead (e.g. local dev without conda).
+  - r-base >=4.2
+  - r-ape
+  - r-castor
+  - r-expm
+  - r-yaml
+
   # --- testing & linting ---
   - pytest >=7.0
   - pytest-cov

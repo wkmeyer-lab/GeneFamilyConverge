@@ -94,13 +94,15 @@ those changes to convergent traits.
 
 - **CAFE-5** — installed separately (see the CAFE-5 project). Used by the
   turnover-modeling stage.
-- **R** for the downstream R steps. The **categorical phenotype tree** step (the
-  CAFE `-y` tree) needs only a light stack — **ape**, **castor**, **expm**,
-  **yaml** — installed with the helper in
-  [`tools/r-deps/`](tools/r-deps/README.md); its ancestral-state reconstruction
-  is vendored (`Src/Reu/r/anc_recon.R`), so **RERconverge is not required**. The
-  planned association stage additionally uses **RERconverge**, **ggplot2**, and
-  **ggtree** (see note below).
+- **R** for the downstream R steps — **included in the `convgeno` conda env**
+  (`environment.yml` adds `r-base` + **ape**, **castor**, **expm**, **yaml**), so a
+  single `conda activate convgeno` covers OrthoFinder *and* the automatic
+  categorical phenotype tree (CAFE `-y`) step end-to-end. Its ancestral-state
+  reconstruction is vendored (`Src/Reu/r/anc_recon.R`), so **RERconverge is not
+  required**. To run that step against an external/module-provided R without conda,
+  install the same stack with [`tools/r-deps/`](tools/r-deps/README.md). The planned
+  association stage additionally uses **RERconverge**, **ggplot2**, and **ggtree**
+  (see note below).
 
 > **RERconverge (optional here):** the vendored engine already reproduces the
 > Meyer Lab reconstruction (`getAncLiks`). To run the lab's own build instead —

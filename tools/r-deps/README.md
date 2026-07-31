@@ -17,11 +17,17 @@ uses only `castor` + `expm` (with base R standing in for `phangorn::to.matrix`
 and `Matrix::t`). This is byte-for-byte the lab's routine, just with a lighter
 dependency footprint.
 
-Like `tools/r8s`, the pipeline keeps **R and its packages out of the conda env**
-(so the OrthoFinder/`convgeno` env stays lean). R is supplied by the system or,
-on a cluster, by a module.
+**By default R now ships inside the `convgeno` conda env** — `environment.yml`
+lists `r-base` plus these packages — so `conda activate convgeno` provides both
+OrthoFinder and the R phenotype step, and the automatic post-OrthoFinder step
+runs end-to-end with no extra setup. Unlike r8s (which genuinely cannot be
+conda-installed), R can, so it lives in the env rather than outside it.
 
-## Automated install (recommended)
+**This installer is the fallback**, for running the R step against an external or
+module-provided R instead — e.g. local dev without conda, or a cluster where you
+`module load R`.
+
+## Installing into an external R (fallback)
 
 No root needed — packages go to your personal R library.
 
