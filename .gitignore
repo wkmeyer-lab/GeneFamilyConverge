@@ -97,6 +97,13 @@ slurm-*.out
 slurm-*.err
 *.sbatch.o*
 *.sbatch.e*
+slurm_scripts/
+
+# --- Workflow orchestration (Snakemake + `convgeno run`) ---
+# Snakemake's runtime state and the per-run SLURM profile + orchestrator script
+# that `convgeno run` generates. Both are regenerated each run.
+.snakemake/
+.convgeno/
 
 # --- Secrets & local overrides ---
 .env

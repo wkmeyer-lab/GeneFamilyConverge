@@ -1,0 +1,145 @@
+# convgeno end-to-end pipeline DAG.
+#
+#   clean proteomes ─▶ OrthoFinder (+ ultrametric & phenotype trees)
+#                    ─▶ CAFE-5 inputs ─▶ run CAFE-5
+#
+# Driven by `convgeno run`, which renders the SLURM profile and invokes:
+#   snakemake --snakefile workflow/Snakefile --workflow-profile <dir> \
+#       --config pipeline_config=<abs path> mode=<multinode|single-node> all
+#
+# Only CAFE-5 is submitted as its own right-sized SLURM job (via the Snakemake
+# SLURM executor). `clean_proteomes`, `cafe_inputs`, and the OrthoFinder wrapper
+# are LOCAL rules that run inside the small orchestrator job; OrthoFinder still
+# fans its heavy all-vs-all search out across the cluster through its own 3-job
+# afterok chain (`convgeno orthofinder run --wait`).
+
+import os
+import shlex
+
+from convgeno.slurm.config import PipelineConfig
+
+try:
+    from snakemake.exceptions import WorkflowError
+except Exception:  # pragma: no cover - fallback if the import path changes
+    WorkflowError = RuntimeError
+
+
+PIPELINE_CONFIG = config.get("pipeline_config")
+if not PIPELINE_CONFIG:
+    raise WorkflowError(
+        "convgeno: pass --config pipeline_config=<path> "
+        "(this is what `convgeno run` does for you)."
+    )
+MODE = config.get("mode", "multinode")
+
+cfg = PipelineConfig.load(PIPELINE_CONFIG)
+if cfg.orthofinder is None:
+    raise WorkflowError("convgeno: config has no 'orthofinder' block; re-run 'convgeno init'.")
+
+PROJECT = cfg.project_dir
+SCRIPTS = os.path.join(PROJECT, "Src", "Loc", "scripts")
+OF_OUT = cfg.orthofinder.output_dir
+
+# proteome_input: raw -> cleaned. The cleaned dir IS OrthoFinder's input dir.
+if cfg.proteome_input is not None:
+    RAW = cfg.proteome_input.raw_dir
+    CLEANED = cfg.proteome_input.cleaned_dir
+    FMT = cfg.proteome_input.header_format
+    DUP = cfg.proteome_input.on_duplicate
+else:
+    RAW = None
+    CLEANED = cfg.orthofinder.input_dir
+    FMT, DUP = "auto", "error"
+
+# The OrthoFinder job tail steps write both trees into OUTPUT_DIR (= OF_OUT),
+# regardless of single-/multi-node mode (see slurm/runtime.py).
+TREE = os.path.join(OF_OUT, "species_tree_ultrametric.nwk")
+LAMBDA = os.path.join(OF_OUT, "lambda_tree.nwk")
+OF_DONE = os.path.join(OF_OUT, ".convgeno_orthofinder_complete")
+
+CAFE_IN_DIR = os.path.join(PROJECT, "Data", "interim", "cafe_input")
+CAFE_COUNTS = os.path.join(CAFE_IN_DIR, "cafe_input.tsv")
+CAFE_TREE = os.path.join(CAFE_IN_DIR, "species_tree.nwk")
+CAFE_OUT_DIR = os.path.join(PROJECT, "Data", "processed", "cafe_results")
+CAFE_DONE = os.path.join(CAFE_OUT_DIR, ".convgeno_cafe_complete")
+
+HAS_PHENO = cfg.phenotype_tree is not None and cfg.phenotype_tree.has_table()
+LAMBDA_ARG = f"--lambda-tree {shlex.quote(LAMBDA)}" if HAS_PHENO else ""
+MODE_FLAG = "--single-node" if MODE == "single-node" else "--multinode"
+CPUS = cfg.slurm.cpus_per_task
+
+# Compute nodes start bare, so a SLURM-submitted rule must activate conda
+# itself. Local rules inherit the already-activated orchestrator environment.
+if cfg.runtime is not None:
+    from convgeno.slurm.runtime import render_conda_bootstrap
+
+    ACTIVATE = render_conda_bootstrap(cfg.runtime) + '\nexport PATH="$HOME/.local/bin:$PATH"\n'
+else:
+    ACTIVATE = ""
+
+
+rule all:
+    input:
+        CAFE_DONE
+    localrule: True
+
+
+# Step 1: longest-isoform filtering. Only defined when a raw-proteome directory
+# is configured; otherwise the cleaned proteomes must be pre-staged in CLEANED.
+if RAW:
+
+    rule clean_proteomes:
+        output:
+            directory(CLEANED)
+        localrule: True
+        shell:
+            'convgeno clean "{RAW}" "{output}" --format {FMT} --on-duplicate {DUP}'
+
+
+# Step 2: OrthoFinder + (tail) r8s ultrametric tree + categorical phenotype tree.
+# Wrapped: the localrule blocks on the existing multi-node afterok chain via
+# `--wait`, then Snakemake touches the completion sentinel.
+rule orthofinder:
+    input:
+        CLEANED
+    output:
+        touch(OF_DONE)
+    localrule: True
+    shell:
+        'convgeno orthofinder run {MODE_FLAG} --wait -y --config "{PIPELINE_CONFIG}"'
+
+
+# Step 3: build the CAFE-5 count matrix + copy the ultrametric species tree.
+rule cafe_inputs:
+    input:
+        OF_DONE
+    output:
+        counts=CAFE_COUNTS,
+        tree=CAFE_TREE
+    localrule: True
+    shell:
+        'python "{SCRIPTS}/prepare_cafe_inputs.py"'
+        ' --orthofinder-dir "{OF_OUT}"'
+        ' --tree "{TREE}"'
+        ' --output-dir "{CAFE_IN_DIR}"'
+
+
+# Step 4: run CAFE-5 (its own right-sized SLURM job via the executor). Uses the
+# categorical phenotype tree (-y) when phenotype data was configured.
+rule cafe_run:
+    input:
+        counts=CAFE_COUNTS,
+        tree=CAFE_TREE
+    output:
+        touch(CAFE_DONE)
+    threads: CPUS
+    params:
+        activate=ACTIVATE,
+        lambda_arg=LAMBDA_ARG,
+    shell:
+        "{params.activate}"
+        'python "{SCRIPTS}/run_cafe.py"'
+        ' --counts "{input.counts}"'
+        ' --tree "{input.tree}"'
+        " {params.lambda_arg}"
+        ' --output-dir "{CAFE_OUT_DIR}"'
