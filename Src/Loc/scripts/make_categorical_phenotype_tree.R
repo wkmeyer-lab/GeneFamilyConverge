@@ -114,6 +114,15 @@ run <- function(argv) {
   opts <- parse_cli(argv)
   cfg <- load_yaml(opts$config)
 
+  # Respect phenotype_tree.enabled so the workflows can call this step
+  # unconditionally (like the other pipeline steps). Absent/true -> run.
+  enabled <- opts$enabled %||% dig(cfg, "phenotype_tree", "enabled")
+  if (isFALSE(enabled) ||
+      (is.character(enabled) && tolower(enabled) %in% c("false", "no", "0", "off"))) {
+    cat("phenotype_tree.enabled is false; skipping the categorical phenotype tree step.\n")
+    return(invisible(0))
+  }
+
   if (!requireNamespace("ape", quietly = TRUE)) {
     stop("The 'ape' package is required.", call. = FALSE)
   }

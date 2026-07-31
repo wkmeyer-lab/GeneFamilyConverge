@@ -27,6 +27,9 @@ python Src/Loc/scripts/make_tree_ultrametric.py --config "$CONFIG" --tools "$TOO
 echo "=== Preparing CAFE-5 inputs ==="
 python Src/Loc/scripts/prepare_cafe_inputs.py --config "$CONFIG"
 
+echo "=== Building categorical phenotype tree (CAFE -y) ==="
+Rscript Src/Loc/scripts/make_categorical_phenotype_tree.R --config "$CONFIG"
+
 echo "=== Running CAFE-5 ==="
 python Src/Loc/scripts/run_cafe.py --config "$CONFIG" --tools "$TOOLS"
 
