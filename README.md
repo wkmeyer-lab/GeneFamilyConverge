@@ -54,6 +54,9 @@ and how to run them.
  (2b) r8s                   ultrametric, time-calibrated        (runs automatically with OrthoFinder)
        │                    species tree
        ▼
+ (2c) phenotype tree        categorical phenotype tree =        (runs automatically with OrthoFinder)
+       │                    CAFE -y multi-λ rate tree
+       ▼
  (3) CAFE-5                 gene-family expansion / contraction
        │
        ▼
@@ -64,9 +67,11 @@ and how to run them.
 The scientific question is whether **shifts in gene-family copy number** line up
 with **independently evolved (convergent) phenotypes** — for example, whether a
 gene family repeatedly expands in lineages that share a diet or habitat.
-OrthoFinder defines the gene families, r8s scales the species tree to time,
-CAFE-5 models where families expand and contract, and a downstream R step links
-those changes to convergent traits.
+OrthoFinder defines the gene families, r8s scales the species tree to time, a
+categorical phenotype tree maps each trait state onto the branches (the CAFE
+`-y` tree), CAFE-5 models where families expand and contract — optionally at a
+separate rate per trait state — and a downstream R step links those changes to
+convergent traits.
 
 ---
 
@@ -205,8 +210,9 @@ convgeno init                 # writes ./pipeline_config.yaml
 convgeno init --output my_config.yaml
 ```
 
-During setup you also choose how the **species tree** is supplied and (optionally)
-give one **divergence-time calibration** so the tree can be dated in real time:
+During setup you also choose how the **species tree** is supplied, (optionally)
+give one **divergence-time calibration** so the tree can be dated in real time,
+and point the pipeline at your **phenotype tip data**:
 
 - **Species tree** — let OrthoFinder build it (default), or bring your own
   (ultrametric or not). See
@@ -217,6 +223,10 @@ give one **divergence-time calibration** so the tree can be dated in real time:
   tree. You can skip it (you get a relative-time tree) or add several
   calibrations later in the config. The full walkthrough is in
   [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md).
+- **Phenotype tip data** — point `init` at a TSV of tip labels and
+  their phenotype (diet, habitat, …). When you provide one, the pipeline builds
+  the **categorical phenotype tree** (the CAFE `-y` tree) **automatically** at the
+  tail of the OrthoFinder job, right after the species tree is dated. 
 
 ### 3. Run OrthoFinder and build the time-calibrated tree
 
@@ -270,6 +280,18 @@ step never risks your OrthoFinder results: it runs only after OrthoFinder has
 already succeeded, and if r8s is missing it is skipped with a clear message. See
 [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md).
 
+**The phenotype tree, too.** If you gave `init` a phenotype table, the same job
+tail then builds the **categorical phenotype tree** — the species-tree topology
+with every branch labelled by an integer trait state (tips from your table,
+internal branches inferred by ancestral-state reconstruction). Written as
+`lambda_tree.nwk` beside the dated tree, it is exactly the CAFE-5 `-y` multi-λ
+tree that lets gene gain/loss rates differ between trait states. Like the r8s
+step it is non-fatal and skips cleanly if R or the table is unavailable. Its
+reconstruction reuses the Meyer-lab RERconverge engine, vendored so only a small
+R stack is needed — and that stack ships in the conda env, so nothing extra to
+install. Advanced users can run it by hand with
+`Src/Loc/scripts/make_categorical_phenotype_tree.R --config …`.
+
 > Advanced users can run the dating step by hand with
 > `Src/Loc/scripts/make_tree_ultrametric.py` (`-p 'sp1,sp2' -c <Myr>`, or
 > repeatable `--calibration NAME:SP1,SP2:AGE`, plus `--nsites`, `--smoothing`,
@@ -282,9 +304,10 @@ and models where each family expands or contracts along the tree. The pipeline
 builds the CAFE-5 count matrix from OrthoFinder's orthogroups
 (`Src/Loc/scripts/prepare_cafe_inputs.py`) and pairs it with the
 `species_tree_ultrametric.nwk` from stage 3 — which is already the **binary,
-rooted, ultrametric time tree** that CAFE-5 requires. For categorical
-phenotypes, a helper builds the multi-λ (`-y`) rate tree CAFE-5 uses to let
-gain/loss rates differ between trait states. CAFE-5 is installed separately.
+rooted, ultrametric time tree** that CAFE-5 requires. When you supplied phenotype
+data, CAFE also takes the `lambda_tree.nwk` (the multi-λ `-y` tree built
+automatically) so gain/loss rates can differ between trait states.
+CAFE-5 is installed separately.
 
 ### 5. Associate copy number with convergent traits
 
@@ -316,6 +339,8 @@ default plus a safety margin works out of the box.
   name them meaningfully (`Homo_sapiens.fa`, `Felis_catus.fa`, …).
 - *(Optional)* Your own species tree in Newick format, and/or one or more
   divergence-time calibrations — supplied during `convgeno init`.
+- A **phenotype table** (TSV: one column of tip labels, one of the
+  phenotype) — supplied during `convgeno init` to build the phenotype tree.
 
 **What you get** (in `orthofinder.output_dir`):
 
@@ -323,6 +348,9 @@ default plus a safety margin works out of the box.
   species tree, and comparative-genomics statistics.
 - `species_tree_ultrametric.nwk` — the time-calibrated species tree (when r8s is
   installed), plus `r8s_work/` with the control file and r8s log.
+- `lambda_tree.nwk` + `lambda_legend.tsv` — the categorical phenotype tree (the
+  CAFE `-y` multi-λ tree) and its integer↔trait-state key (when you supplied
+  phenotype data).
 - A gene-family count matrix suitable for CAFE-5.
 
 ---
@@ -357,6 +385,12 @@ ultrametric:                 # the r8s dating step (from your init answers)
   divergence_my: 94.0
   smoothing: 100             # higher = closer to a strict molecular clock
 
+phenotype_tree:              
+  table: Data/phenotypes.tsv # tip labels + phenotype; presence enables the step
+  id_col: species            # column of tip labels (= proteome basenames)
+  pheno_col: phenotype       # column of trait states
+  model: ER                  # ancestral-reconstruction model: ER | SYM | ARD
+
 multinode:                   # OPTIONAL — every knob auto-derives if omitted
   throughput_const: 6.055387e11   # from the throughput-calibration kit
 ```
@@ -379,6 +413,7 @@ age windows — see the
 | `python Src/Loc/scripts/filter_isoforms.py dir <in> <out>` | Batch longest-isoform filtering (directory of proteomes). |
 | `python Src/Loc/scripts/filter_isoforms.py files -i <in…> -o <out>` | Longest-isoform filtering from one or more files into one FASTA. |
 | `python Src/Loc/scripts/make_tree_ultrametric.py …` | Run the r8s dating step by hand (normally automatic). |
+| `Rscript Src/Loc/scripts/make_categorical_phenotype_tree.R …` | Build the categorical phenotype tree (CAFE `-y`) by hand (normally automatic). |
 
 `convgeno` (no arguments) prints help. See [Usage](#usage) for the full flag
 lists.
