@@ -26,8 +26,15 @@ TOOLS="Src/Loc/configs/tool_paths.yaml"
 echo "=== Validating inputs ==="
 python Src/Loc/scripts/validate_inputs.py --config "$CONFIG" --tools "$TOOLS"
 
-echo "=== Preparing proteomes ==="
-python Src/Loc/scripts/prepare_proteomes.py --config "$CONFIG"
+echo "=== Filtering proteomes to longest isoform per gene ==="
+# filter_isoforms.py takes explicit paths, not --config: keep these in sync with
+# inputs.proteome_dir and orthofinder.input_dir in $CONFIG; --format matches
+# inputs.source_format.
+python Src/Loc/scripts/filter_isoforms.py dir \
+    Data/raw/proteomes \
+    Data/interim/cleaned_proteomes \
+    --format ensembl \
+    --stats-json Data/logs/isoform_filter_stats.json
 
 echo "=== Submitting OrthoFinder ==="
 # The OrthoFinder job also makes the species tree ultrametric (r8s) and
