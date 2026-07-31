@@ -15,6 +15,10 @@ The pipeline is command-line driven through the `convgeno` tool plus a small set
 of stage scripts. This README tells you how to install it, what each stage does,
 and how to run them.
 
+> If GeneFamilyConverge is useful to you, please **⭐ star** or **fork** the
+> [repository](https://github.com/wkmeyer-lab/GeneFamilyConverge) — it helps
+> others find it.
+
 ---
 
 ## Contents
@@ -119,22 +123,38 @@ convergent traits.
 
 ## Installation
 
+### 1. Get the code
+
+Clone the repository onto your cluster (or fork it first to have your own copy):
+
 ```bash
-# Create and activate the conda environment (installs OrthoFinder + friends)
-conda env create -f environment.yml
+git clone https://github.com/wkmeyer-lab/GeneFamilyConverge.git
+cd GeneFamilyConverge
+```
+
+### 2. Create the `convgeno` environment
+
+```bash
+./scripts/setup_env.sh       # run this from a login node
 conda activate convgeno
-
-# Editable-install the convgeno Python package (also provides the CLI)
-pip install -e Src/Reu/python/
 ```
 
-The environment is named **`convgeno`** and provides the `convgeno` command-line
-tool. Then, once, build r8s for the dating step:
+`setup_env.sh` installs everything the pipeline needs — OrthoFinder and its
+friends, the R stack, Snakemake, and the `convgeno` command itself. It sets the
+environment up on a **compute node** (the dependency solve needs more memory
+than a login node allows), so just run it from the login node and it takes care
+of the rest. Already inside an interactive job, or on a personal machine? Add
+`--here`. Run `./scripts/setup_env.sh --help` for the other options
+(`--partition`, `--mem`, `--time`, `--conda-module`, …).
+
+### 3. Build r8s for the dated tree (once)
 
 ```bash
-# See tools/r8s/README.md for module/toolchain details
-./tools/r8s/install_r8s.sh
+./tools/r8s/install_r8s.sh   # see tools/r8s/README.md for toolchain details
 ```
+
+r8s is optional — without it OrthoFinder still runs and the dating step is
+simply skipped.
 
 ---
 

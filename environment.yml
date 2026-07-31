@@ -41,10 +41,15 @@ dependencies:
   - pytest >=7.0
   - pytest-cov
 
-  # --- pipeline tools (uncomment as needed) ---
+  # --- workflow orchestration (the `convgeno run` DAG driver) ---
+  # Snakemake 8 drives the end-to-end DAG; the SLURM executor plugin lets it
+  # submit each stage as a cluster job. Both are required by `convgeno run`.
+  - snakemake-minimal >=8
+  - snakemake-executor-plugin-slurm
+
+  # --- optional pipeline tools (uncomment as needed) ---
   # - blast >=2.14
   # - hmmer >=3.3
-  # - snakemake >=8.0
 
   # NOTE: r8s (ultrametric step) is NOT on conda — build it from source with
   #   ./tools/r8s/install_r8s.sh   (see tools/r8s/README.md)
