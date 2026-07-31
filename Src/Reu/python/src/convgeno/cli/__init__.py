@@ -70,6 +70,59 @@ def main() -> None:
         help="Path to write the config file (default: pipeline_config.yaml)",
     )
 
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help=(
+            "Filter raw proteomes to the longest isoform per gene "
+            "(the pipeline's first step)."
+        ),
+    )
+    clean_parser.add_argument(
+        "raw_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Directory of raw proteomes (one FASTA per species). "
+            "Default: proteome_input.raw_dir from the config."
+        ),
+    )
+    clean_parser.add_argument(
+        "out_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Output directory for cleaned proteomes. "
+            "Default: proteome_input.cleaned_dir from the config."
+        ),
+    )
+    clean_parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Pipeline config to read proteome_input from when raw_dir/out_dir "
+            "are omitted (default: pipeline_config_<mode>.yaml, else "
+            "pipeline_config.yaml)."
+        ),
+    )
+    clean_parser.add_argument(
+        "--format",
+        choices=["auto", "ensembl", "ncbi"],
+        default=None,
+        dest="header_format",
+        help="Header format for gene-ID extraction (default: from config, else auto).",
+    )
+    clean_parser.add_argument(
+        "--on-duplicate",
+        choices=["error", "warn", "skip"],
+        default=None,
+        help="How to handle duplicate gene IDs (default: from config, else error).",
+    )
+    clean_parser.add_argument(
+        "--stats-json",
+        default=None,
+        help="Write per-species summary statistics to this JSON file.",
+    )
+
     of_parser = subparsers.add_parser(
         "orthofinder",
         help="Generate and submit OrthoFinder SLURM jobs.",
@@ -187,6 +240,20 @@ def main() -> None:
         from convgeno.cli.init_cmd import run_init
 
         run_init(output_path=args.output)
+
+    elif args.command == "clean":
+        from convgeno.cli.clean_cmd import run_clean
+
+        sys.exit(
+            run_clean(
+                config_path=args.config,
+                raw_dir=args.raw_dir,
+                out_dir=args.out_dir,
+                header_format=args.header_format,
+                on_duplicate=args.on_duplicate,
+                stats_json=args.stats_json,
+            )
+        )
 
     elif args.command == "orthofinder":
         if args.orthofinder_command == "generate":

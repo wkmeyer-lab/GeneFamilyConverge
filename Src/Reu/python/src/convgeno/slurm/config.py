@@ -273,12 +273,49 @@ class PhenotypeTreeConfig:
 
 
 @dataclass(frozen=True)
+class ProteomeInputConfig:
+    """Raw proteomes + longest-isoform cleaning settings, collected by ``init``.
+
+    ``raw_dir`` holds the user's RAW proteomes (one protein FASTA per species,
+    gzip/bz2 fine). The pipeline's first step filters each proteome to its
+    longest isoform per gene and writes the cleaned set to ``cleaned_dir`` —
+    which is exactly the directory OrthoFinder runs on
+    (``orthofinder.input_dir``). ``header_format`` and ``on_duplicate`` are
+    passed straight through to :func:`convgeno.io.fasta.process_directory`.
+
+    When ``raw_dir`` is unset the cleaning step is skipped: the user is expected
+    to place already-cleaned proteomes in ``cleaned_dir`` themselves (the
+    behaviour before ``init`` learned to ingest raw proteomes).
+    """
+
+    raw_dir: str | None = None
+    cleaned_dir: str = "Data/interim/cleaned_proteomes"
+    header_format: str = "auto"
+    on_duplicate: str = "error"
+
+    def has_raw(self) -> bool:
+        """True when a raw proteome directory is set (cleaning is wired in)."""
+        return bool(self.raw_dir)
+
+    def to_dict(self) -> dict:
+        """Serialize, omitting ``None`` fields."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ProteomeInputConfig:
+        """Construct from a dict; unknown keys ignored for forward-compat."""
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline configuration combining project paths and SLURM settings."""
 
     project_dir: str
     conda_env: str = "convgeno"
     slurm: SlurmConfig = field(default_factory=lambda: SlurmConfig(partition=""))
+    proteome_input: ProteomeInputConfig | None = None
     orthofinder: Optional[OrthoFinderConfig] = None
     runtime: Optional[CondaRuntimeConfig] = None
     multinode: Optional[MultinodeConfig] = None
@@ -295,6 +332,8 @@ class PipelineConfig:
             "conda_env": self.conda_env,
             "slurm": self.slurm.to_dict(),
         }
+        if self.proteome_input is not None and self.proteome_input.has_raw():
+            data["proteome_input"] = self.proteome_input.to_dict()
         if self.orthofinder is not None:
             data["orthofinder"] = self.orthofinder.to_dict()
         if self.multinode is not None:
@@ -332,6 +371,8 @@ class PipelineConfig:
             raise ValueError("Config file is missing required key 'project_dir'.")
         slurm_dict = data.get("slurm", {})
         slurm_config = SlurmConfig.from_dict(slurm_dict)
+        pi_dict = data.get("proteome_input")
+        pi_config = ProteomeInputConfig.from_dict(pi_dict) if pi_dict else None
         of_dict = data.get("orthofinder")
         of_config = OrthoFinderConfig.from_dict(of_dict) if of_dict else None
         runtime_dict = data.get("runtime")
@@ -350,6 +391,7 @@ class PipelineConfig:
             project_dir=data["project_dir"],
             conda_env=data.get("conda_env", "convgeno"),
             slurm=slurm_config,
+            proteome_input=pi_config,
             orthofinder=of_config,
             runtime=runtime_config,
             multinode=mn_config,

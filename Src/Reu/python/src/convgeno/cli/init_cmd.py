@@ -8,10 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.external.config import OrthoFinderConfig
-from convgeno.io.fasta import FASTA_EXTENSIONS
+from convgeno.io.fasta import FASTA_EXTENSIONS, discover_fasta_files
 from convgeno.slurm.config import (
     PhenotypeTreeConfig,
     PipelineConfig,
+    ProteomeInputConfig,
     SlurmConfig,
     SpeciesTreeConfig,
     UltrametricConfig,
@@ -163,6 +164,73 @@ def _prompt_species(message: str, available: set[str]) -> str:
         if _is_valid_species(name, available):
             return name
         _report_bad_species(name, available)
+
+
+def _prompt_proteome_input(cleaned_dir: Path) -> ProteomeInputConfig:
+    """Prompt for the RAW proteome directory the pipeline cleans first.
+
+    The first pipeline step filters each raw proteome to its longest isoform per
+    gene and writes the result into *cleaned_dir* (= ``orthofinder.input_dir``),
+    so no separate ``filter_isoforms.py`` run is needed. Pressing Enter skips
+    this: the user is then expected to stage already-cleaned proteomes in
+    *cleaned_dir* themselves. The directory is not required to exist yet — like
+    the other paths, it is read when the pipeline runs.
+    """
+    print("\n=== Raw proteomes (longest-isoform cleaning) ===")
+    print(
+        "Point the pipeline at your RAW proteomes (one protein FASTA per\n"
+        "species; .gz/.bz2 fine). The first step filters each to its longest\n"
+        "isoform per gene and writes the cleaned set to:\n"
+        f"  {cleaned_dir}\n"
+        "which is what OrthoFinder then runs on. File basenames become the\n"
+        "species tip labels everywhere downstream, so name them meaningfully\n"
+        "(e.g. 'Homo_sapiens.fa'). Press Enter to SKIP if your proteomes are\n"
+        "already cleaned and staged in that directory."
+    )
+    raw = _prompt_optional("Path to your raw proteome directory")
+    if raw is None:
+        print(
+            f"  No raw directory set: place cleaned proteomes in {cleaned_dir}\n"
+            "  yourself (the automatic cleaning step is skipped)."
+        )
+        return ProteomeInputConfig(cleaned_dir=str(cleaned_dir))
+
+    raw_path = Path(raw).expanduser()
+    if raw_path.is_dir():
+        try:
+            count = len(discover_fasta_files(raw_path))
+        except (OSError, ValueError):
+            count = 0
+        if count:
+            print(f"  Found {count} FASTA file(s) in {raw_path}.")
+        else:
+            print(
+                f"  Warning: no FASTA files (.fa/.fasta/.faa, optionally .gz/.bz2) "
+                f"found in {raw_path} yet."
+            )
+    else:
+        print(
+            f"  Note: {raw_path} does not exist yet — that's fine; it will be read\n"
+            "  when the pipeline runs. Make sure it holds one FASTA per species."
+        )
+
+    fmt = _prompt(
+        "Header format for gene-ID extraction (auto/ensembl/ncbi)", default="auto"
+    ).lower()
+    if fmt not in {"auto", "ensembl", "ncbi"}:
+        print("  Unrecognized format; using 'auto'.")
+        fmt = "auto"
+    dup = _prompt("On duplicate gene IDs (error/warn/skip)", default="error").lower()
+    if dup not in {"error", "warn", "skip"}:
+        print("  Unrecognized value; using 'error'.")
+        dup = "error"
+
+    return ProteomeInputConfig(
+        raw_dir=str(raw_path),
+        cleaned_dir=str(cleaned_dir),
+        header_format=fmt,
+        on_duplicate=dup,
+    )
 
 
 def _prompt_calibration(input_dir: Path) -> UltrametricConfig:
@@ -697,9 +765,15 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     )
     project_path = Path(project_dir)
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Raw proteomes -> cleaned proteomes. The cleaned directory IS OrthoFinder's
+    # input dir, so the longest-isoform filter runs automatically as step 1.
+    cleaned_dir = project_path / "Data/interim/cleaned_proteomes"
+    proteome_input = _prompt_proteome_input(cleaned_dir)
+
     # output_dir is filled in per mode when the two configs are written below.
     orthofinder = OrthoFinderConfig(
-        input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
+        input_dir=proteome_input.cleaned_dir,
         output_dir="",
         search_threads=search_threads,
         analysis_threads=analysis_threads,
@@ -759,6 +833,7 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         project_dir=project_dir,
         conda_env=conda_env,
         slurm=slurm,
+        proteome_input=proteome_input,
         orthofinder=orthofinder,
         runtime=runtime_config,
         ultrametric=ultrametric,
@@ -787,6 +862,18 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print("Summary:")
     print(f"  Project directory:  {project_dir}")
     print(f"  Conda environment:  {conda_env}")
+    if proteome_input.has_raw():
+        print(f"  Raw proteomes:      {proteome_input.raw_dir}")
+        print(f"                      -> cleaned to {proteome_input.cleaned_dir}")
+        print(
+            f"                      format={proteome_input.header_format}, "
+            f"on-duplicate={proteome_input.on_duplicate}"
+        )
+    else:
+        print(
+            "  Raw proteomes:      none "
+            f"(expects cleaned proteomes already in {proteome_input.cleaned_dir})"
+        )
     print(f"  SLURM partition:    {partition_name}")
     print(f"  CPUs per task:      {cpus_per_task}")
     print(f"  Time limit:         {time_limit}")

@@ -14,6 +14,7 @@ from convgeno.slurm.config import (
     MultinodeConfig,
     PhenotypeTreeConfig,
     PipelineConfig,
+    ProteomeInputConfig,
     SlurmConfig,
     SpeciesTreeConfig,
     UltrametricConfig,
@@ -106,6 +107,65 @@ class TestSpeciesTreeConfig:
         assert loaded.species_tree.path == "/data/my_tree.nwk"
         assert loaded.species_tree.is_ultrametric is False
         assert loaded.species_tree.num_sites == 1234
+
+
+class TestProteomeInputConfig:
+    def test_has_raw(self):
+        assert ProteomeInputConfig(raw_dir="/raw").has_raw() is True
+        assert ProteomeInputConfig().has_raw() is False
+
+    def test_defaults(self):
+        cfg = ProteomeInputConfig(raw_dir="/raw")
+        assert cfg.cleaned_dir == "Data/interim/cleaned_proteomes"
+        assert cfg.header_format == "auto"
+        assert cfg.on_duplicate == "error"
+
+    def test_from_dict_ignores_unknown_keys(self):
+        cfg = ProteomeInputConfig.from_dict(
+            {
+                "raw_dir": "/raw",
+                "cleaned_dir": "/clean",
+                "header_format": "ensembl",
+                "on_duplicate": "warn",
+                "future": "x",
+            }
+        )
+        assert cfg.raw_dir == "/raw"
+        assert cfg.cleaned_dir == "/clean"
+        assert cfg.header_format == "ensembl"
+        assert cfg.on_duplicate == "warn"
+
+    def test_pipeline_config_round_trips_proteome_input(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            proteome_input=ProteomeInputConfig(
+                raw_dir="/data/raw_proteomes",
+                cleaned_dir="/p/Data/interim/cleaned_proteomes",
+                header_format="ncbi",
+                on_duplicate="skip",
+            ),
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "proteome_input:" in path.read_text(encoding="utf-8")
+        loaded = PipelineConfig.load(path)
+        assert loaded.proteome_input is not None
+        assert loaded.proteome_input.raw_dir == "/data/raw_proteomes"
+        assert loaded.proteome_input.cleaned_dir == "/p/Data/interim/cleaned_proteomes"
+        assert loaded.proteome_input.header_format == "ncbi"
+        assert loaded.proteome_input.on_duplicate == "skip"
+
+    def test_pipeline_config_omits_when_no_raw_dir(self, tmp_path: Path):
+        cfg = PipelineConfig(
+            project_dir="/p",
+            slurm=SlurmConfig(partition="hawkcpu"),
+            proteome_input=ProteomeInputConfig(),  # no raw_dir
+        )
+        path = tmp_path / "pipeline_config.yaml"
+        cfg.save(path)
+        assert "proteome_input:" not in path.read_text(encoding="utf-8")
+        assert PipelineConfig.load(path).proteome_input is None
 
 
 class TestPhenotypeTreeConfig:

@@ -121,6 +121,7 @@ class TestInitCreatesConfig:
             "72:00:00",     # time limit
             "",             # mail user (skip)
             "",             # account (skip)
+            "",             # raw proteome directory (Enter to skip cleaning)
             "",             # user species tree (skip)
             "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
@@ -211,6 +212,7 @@ class TestInitCreatesConfig:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # raw proteome directory (Enter to skip cleaning)
             "",              # user species tree (skip)
             "Homo_sapiens",  # calibration species A (valid)
             "Felis_catus",   # calibration species B (valid)
@@ -265,6 +267,7 @@ class TestInitCreatesConfig:
             "24:00:00",            # time limit
             "user@example.com",    # mail
             "myaccount",           # account
+            "",                    # raw proteome directory (Enter to skip cleaning)
             "",                    # user species tree (skip)
             "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
@@ -319,6 +322,7 @@ class TestInitCreatesConfig:
             "72:00:00",            # time limit
             "",                    # mail
             "",                    # account
+            "",                    # raw proteome directory (Enter to skip cleaning)
             "",                    # user species tree (skip)
             "",                    # calibration species (skip)
             "",                    # accept detected runtime defaults, if present
@@ -384,6 +388,7 @@ class TestInitOverwriteBehaviour:
             "12:00:00",   # time
             "",           # mail (skip)
             "",           # account (skip)
+            "",           # raw proteome directory (Enter to skip cleaning)
             "",           # user species tree (skip)
             "",           # calibration species (skip)
             "",           # accept detected runtime defaults, if present
@@ -438,6 +443,7 @@ class TestInitWarnings:
             "72:00:00",     # time
             "",             # mail
             "",             # account
+            "",             # raw proteome directory (Enter to skip cleaning)
             "",             # user species tree (skip)
             "",             # calibration species (skip)
             "",             # accept detected runtime defaults, if present
@@ -521,6 +527,7 @@ class TestInitUserSpeciesTree:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # raw proteome directory (Enter to skip cleaning)
             str(tree),       # user species tree path
             "y",             # is ultrametric? -> verified, calibration skipped
             "",              # accept detected runtime defaults, if present
@@ -556,6 +563,7 @@ class TestInitUserSpeciesTree:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # raw proteome directory (Enter to skip cleaning)
             str(tree),       # user species tree path
             "n",             # is ultrametric? no
             "500",           # num_sites for r8s
@@ -593,6 +601,7 @@ class TestInitUserSpeciesTree:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # raw proteome directory (Enter to skip cleaning)
             "",              # user species tree (skip -> OrthoFinder default)
             "",              # calibration species (skip)
             "",              # accept detected runtime defaults, if present
@@ -621,6 +630,7 @@ class TestInitUserSpeciesTree:
             "72:00:00",      # time
             "",              # mail
             "",              # account
+            "",              # raw proteome directory (Enter to skip cleaning)
             str(tree),       # user species tree path
             "y",             # is ultrametric?
             "",              # accept detected runtime defaults, if present
@@ -638,3 +648,100 @@ class TestInitUserSpeciesTree:
             assert cfg.species_tree.is_ultrametric is True
         # The species-tree record is identical across both execution modes.
         assert mn.species_tree == sn.species_tree
+
+
+class TestInitRawProteomes:
+    """init ingests a raw-proteome directory that the pipeline cleans first."""
+
+    def _patches(self):
+        return (
+            patch("convgeno.cli.init_cmd.discover_partitions", return_value=[]),
+            patch(
+                "convgeno.cli.init_cmd.detect_partition_memory",
+                return_value={
+                    "max_mem_per_cpu_mb": None,
+                    "def_mem_per_cpu_mb": None,
+                    "max_mem_per_node_mb": None,
+                    "def_mem_per_node_mb": None,
+                    "min_node_memory_mb": 100000,
+                },
+            ),
+            patch(
+                "convgeno.cli.init_cmd.detect_scratch_dir",
+                return_value={
+                    "scratch_base": None,
+                    "is_ephemeral": False,
+                    "method": "none",
+                },
+            ),
+        )
+
+    def test_raw_proteomes_prompted_and_saved(self, tmp_path: Path):
+        raw = tmp_path / "raw_proteomes"
+        raw.mkdir()
+        (raw / "Homo_sapiens.faa").write_text(">x\nMK\n", encoding="utf-8")
+        (raw / "Felis_catus.faa").write_text(">x\nMK\n", encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            str(raw),        # raw proteome directory
+            "ncbi",          # header format
+            "skip",          # on-duplicate policy
+            "",              # user species tree (skip)
+            "",              # calibration species (skip)
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        assert loaded.proteome_input is not None
+        assert Path(loaded.proteome_input.raw_dir) == raw
+        cleaned = tmp_path / "Data" / "interim" / "cleaned_proteomes"
+        assert Path(loaded.proteome_input.cleaned_dir) == cleaned
+        assert loaded.proteome_input.header_format == "ncbi"
+        assert loaded.proteome_input.on_duplicate == "skip"
+        # The cleaned dir the pipeline writes IS OrthoFinder's input dir.
+        assert loaded.orthofinder is not None
+        assert loaded.orthofinder.input_dir == loaded.proteome_input.cleaned_dir
+
+    def test_skipping_raw_proteomes_omits_block(self, tmp_path: Path):
+        output = tmp_path / "config.yaml"
+
+        inputs = iter([
+            str(tmp_path),   # project dir
+            "convgeno",      # env
+            "testpart",      # partition (no sinfo)
+            "16",            # cpus
+            "120G",          # memory
+            "",              # aligner
+            "72:00:00",      # time
+            "",              # mail
+            "",              # account
+            "",              # raw proteome directory (Enter -> skip cleaning)
+            "",              # user species tree (skip)
+            "",              # calibration species (skip)
+            "",              # accept detected runtime defaults, if present
+        ])
+
+        p_disc, p_mem, p_scratch = self._patches()
+        with p_disc, p_mem, p_scratch, patch("builtins.input", side_effect=inputs):
+            run_init(output_path=str(output))
+
+        loaded = PipelineConfig.load(_mode_config_path(output, "multinode"))
+        # No raw dir -> no proteome_input block persisted, but OrthoFinder still
+        # points at the conventional cleaned-proteomes directory.
+        assert loaded.proteome_input is None
+        assert loaded.orthofinder is not None
+        assert loaded.orthofinder.input_dir.endswith("cleaned_proteomes")
