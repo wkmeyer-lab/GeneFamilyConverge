@@ -8,6 +8,7 @@ from convgeno.external.cafe import (
     build_command,
     format_gene_counts_for_cafe,
     validate_input,
+    validate_lambda_tree,
     validate_output,
 )
 from convgeno.io.tables import read_tsv
@@ -69,6 +70,14 @@ class TestBuildCommand:
         assert "-k" in cmd and "5" in cmd
         assert cmd[-3:] == ["-p", "-o", "out"]
 
+    def test_with_lambda_tree(self):
+        cmd = build_command("c.tsv", "t.nwk", lambda_tree="lambda.nwk")
+        assert cmd == ["cafe5", "-i", "c.tsv", "-t", "t.nwk", "-y", "lambda.nwk"]
+
+    def test_lambda_tree_precedes_gamma(self):
+        cmd = build_command("c.tsv", "t.nwk", n_gamma_cats=3, lambda_tree="l.nwk")
+        assert cmd == ["cafe5", "-i", "c.tsv", "-t", "t.nwk", "-y", "l.nwk", "-k", "3"]
+
 
 class TestValidateInput:
     def _cafe_counts(self, gene_count_file: Path, tmp_path: Path) -> Path:
@@ -117,3 +126,26 @@ class TestValidateOutput:
         d.mkdir()
         (d / "Base_results.txt").write_text("ok", encoding="utf-8")
         assert validate_output(d) == []
+
+
+class TestValidateLambdaTree:
+    def _w(self, tmp_path: Path, name: str, text: str) -> Path:
+        p = tmp_path / name
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_valid(self, tmp_path: Path):
+        t = self._w(tmp_path, "t.nwk", "((human:47,cat:47):47,dog:94);\n")
+        y = self._w(tmp_path, "y.nwk", "((human:1,cat:1):1,dog:2);\n")
+        assert validate_lambda_tree(y, t) == []
+
+    def test_tip_mismatch_reported(self, tmp_path: Path):
+        t = self._w(tmp_path, "t.nwk", "((human:47,cat:47):47,dog:94);\n")
+        y = self._w(tmp_path, "y.nwk", "((human:1,cat:1):1,frog:2);\n")
+        joined = " ".join(validate_lambda_tree(y, t))
+        assert "frog" in joined and "dog" in joined
+
+    def test_non_integer_labels_reported(self, tmp_path: Path):
+        t = self._w(tmp_path, "t.nwk", "((human:47,cat:47):47,dog:94);\n")
+        y = self._w(tmp_path, "y.nwk", "((human:1.5,cat:1):1,dog:2);\n")
+        assert any("integer" in e.lower() for e in validate_lambda_tree(y, t))

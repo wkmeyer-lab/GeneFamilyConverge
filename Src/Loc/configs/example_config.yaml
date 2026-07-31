@@ -116,6 +116,12 @@ cafe:
   # Optional: exclude families with >= this many copies in any species
   # (mirrors the CAFE-5 tutorial's size filter). Leave blank for no filter.
   max_family_size: null
+  # Categorical phenotype tree (the CAFE -y multi-lambda tree) from
+  # make_categorical_phenotype_tree.R (phenotype_tree.output above). When set,
+  # run_cafe passes it as `-y` so CAFE estimates a separate turnover rate (lambda)
+  # per phenotype class; the -y tree must share -t's topology and tips. Leave null
+  # to fit a single lambda for the whole tree.
+  lambda_tree: Data/interim/cafe_input/lambda_tree.nwk
 
 runtime:
   # If true, overwrite existing intermediate outputs

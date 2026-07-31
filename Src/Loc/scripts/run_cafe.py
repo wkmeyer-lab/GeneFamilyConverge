@@ -6,6 +6,7 @@ phylogeny. Identifies gene families with significantly rapid evolution.
 
 Inputs:  Data/interim/cafe_input/cafe_input.tsv
          Data/interim/cafe_input/species_tree.nwk
+         Data/interim/cafe_input/lambda_tree.nwk   (optional; CAFE -y multi-lambda)
 Outputs: Data/processed/cafe/
 Logs:    Data/logs/cafe/
 
@@ -23,8 +24,11 @@ def main():
     parser = argparse.ArgumentParser(description="Run CAFE-5")
     parser.add_argument("--config", required=True)
     parser.add_argument("--tools", required=True)
-    args = parser.parse_args()
-    # TODO: implement — delegates to convgeno.external.cafe
+    parser.parse_args()
+    # TODO: implement — delegates to convgeno.external.cafe. When built, read
+    # cafe.lambda_tree from --config; if set, validate it with
+    # cafe.validate_lambda_tree(lambda_tree, species_tree) and pass it to
+    # cafe.build_command(..., lambda_tree=lambda_tree) so CAFE runs with `-y`.
     print("run_cafe.py: not yet implemented", file=sys.stderr)
     sys.exit(1)
 
