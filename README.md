@@ -94,13 +94,19 @@ those changes to convergent traits.
 
 - **CAFE-5** — installed separately (see the CAFE-5 project). Used by the
   turnover-modeling stage.
-- **R** with the packages used downstream: **RERconverge** (see note below),
-  **ape**, **castor**, **ggplot2**, and **ggtree**.
+- **R** for the downstream R steps. The **categorical phenotype tree** step (the
+  CAFE `-y` tree) needs only a light stack — **ape**, **castor**, **expm**,
+  **yaml** — installed with the helper in
+  [`tools/r-deps/`](tools/r-deps/README.md); its ancestral-state reconstruction
+  is vendored (`Src/Reu/r/anc_recon.R`), so **RERconverge is not required**. The
+  planned association stage additionally uses **RERconverge**, **ggplot2**, and
+  **ggtree** (see note below).
 
-> **RERconverge:** the association stage targets the Meyer Lab's RERconverge
-> functions (e.g. `getAncLiks`, `char2TreeCategorical`), which live in
-> the lab fork rather than the CRAN/official release. Install/attach that build,
-> or source the lab's `RERConvergeFunctions.R`.
+> **RERconverge (optional here):** the vendored engine already reproduces the
+> Meyer Lab reconstruction (`getAncLiks`). To run the lab's own build instead —
+> or for the association stage that targets its functions — install/attach
+> RERconverge (the lab fork, not the CRAN/official release) or source the lab's
+> `RERConvergeFunctions.R` and set `phenotype_tree.rer_functions`.
 
 ---
 
@@ -387,6 +393,7 @@ lists.
 | Choosing / supplying the species tree | [`docs/species_tree/species_tree.md`](docs/species_tree/species_tree.md) |
 | Divergence-time calibration (r8s) | [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md) |
 | Installing r8s from source | [`tools/r8s/README.md`](tools/r8s/README.md) |
+| Installing the R packages | [`tools/r-deps/README.md`](tools/r-deps/README.md) |
 | Calibrating the DIAMOND throughput constant | [`tools/throughput-constant/README.md`](tools/throughput-constant/README.md) |
 
 ---
