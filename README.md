@@ -24,11 +24,11 @@ and how to run them.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Usage](#usage)
-  - [1. Filter isoforms](#1-filter-isoforms)
-  - [2. Set up your run (`convgeno init`)](#2-set-up-your-run-convgeno-init)
-  - [3. Run OrthoFinder and build the time-calibrated tree](#3-run-orthofinder-and-build-the-time-calibrated-tree)
-  - [4. Model gene-family turnover with CAFE-5](#4-model-gene-family-turnover-with-cafe-5)
-  - [5. Associate copy number with convergent traits](#5-associate-copy-number-with-convergent-traits)
+  - [Filter isoforms](#filter-isoforms)
+  - [Set up your run (`convgeno init`)](#set-up-your-run-convgeno-init)
+  - [Run OrthoFinder and build the time-calibrated tree](#run-orthofinder-and-build-the-time-calibrated-tree)
+  - [Model gene-family turnover with CAFE-5](#model-gene-family-turnover-with-cafe-5)
+  - [Associate copy number with convergent traits](#associate-copy-number-with-convergent-traits)
   - [Calibrating DIAMOND throughput](#calibrating-diamond-throughput)
 - [Inputs and outputs](#inputs-and-outputs)
 - [Configuration](#configuration)
@@ -45,22 +45,22 @@ and how to run them.
    proteomes                one FASTA per species
        │
        ▼
- (1) filter isoforms        longest protein per gene            convgeno / filter_isoforms.py
+   filter isoforms          longest protein per gene            convgeno / filter_isoforms.py
        │
        ▼
- (2) OrthoFinder            gene families (orthogroups)         convgeno orthofinder
+   OrthoFinder              gene families (orthogroups)         convgeno orthofinder
        │  + species tree
        ▼
- (2b) r8s                   ultrametric, time-calibrated        (runs automatically with OrthoFinder)
+   r8s                      ultrametric, time-calibrated        (runs automatically with OrthoFinder)
        │                    species tree
        ▼
- (2c) phenotype tree        categorical phenotype tree =        (runs automatically with OrthoFinder)
+   phenotype tree           categorical phenotype tree =        (runs automatically with OrthoFinder)
        │                    CAFE -y multi-λ rate tree
        ▼
- (3) CAFE-5                 gene-family expansion / contraction
+   CAFE-5                   gene-family expansion / contraction
        │
        ▼
- (4) R analysis             copy-number change ↔ convergent      RERconverge-based association
+   R analysis               copy-number change ↔ convergent      RERconverge-based association
                             phenotype
 ```
 
@@ -120,11 +120,11 @@ convergent traits.
 ## Installation
 
 ```bash
-# 1. Create and activate the conda environment (installs OrthoFinder + friends)
+# Create and activate the conda environment (installs OrthoFinder + friends)
 conda env create -f environment.yml
 conda activate convgeno
 
-# 2. Editable-install the convgeno Python package (also provides the CLI)
+# Editable-install the convgeno Python package (also provides the CLI)
 pip install -e Src/Reu/python/
 ```
 
@@ -143,18 +143,18 @@ tool. Then, once, build r8s for the dating step:
 From a login node with the environment active:
 
 ```bash
-# 1. Clean your proteomes: keep the longest protein per gene, one FASTA per species
+# Clean your proteomes: keep the longest protein per gene, one FASTA per species
 python Src/Loc/scripts/filter_isoforms.py dir raw_proteomes/ cleaned_proteomes/
 
-# 2. One-time interactive setup: detects your cluster and writes pipeline_config.yaml
+# One-time interactive setup: detects your cluster and writes pipeline_config.yaml
 convgeno init
 
-# 3. Generate + submit the OrthoFinder workflow (multi-node is the default)
+# Generate + submit the OrthoFinder workflow (multi-node is the default)
 convgeno orthofinder run          # shows the scripts, then asks to submit
 #   …or skip the prompt:
 convgeno orthofinder run -y
 
-# 4. Watch it
+# Watch it
 squeue -u "$USER"
 ```
 
@@ -168,7 +168,7 @@ installed and you gave a calibration during `init` — a time-calibrated
 
 Run everything from the repository root, with the `convgeno` environment active.
 
-### 1. Filter isoforms
+### Filter isoforms
 
 OrthoFinder expects one clean FASTA per species with a
 single representative protein per gene. This step reduces each proteome to its
@@ -198,7 +198,7 @@ Tip labels downstream come from the **file basename** (without extension), so
 name each output file for its species — e.g. `Homo_sapiens.fa`. Recognized
 extensions are `.fa`, `.fasta`, and `.faa`.
 
-### 2. Set up your run (`convgeno init`)
+### Set up your run (`convgeno init`)
 
 `convgeno init` is a one-time interactive wizard. It probes
 your cluster (partitions, cores, memory, scratch) and records the absolute conda
@@ -228,7 +228,7 @@ and point the pipeline at your **phenotype tip data**:
   the **categorical phenotype tree** (the CAFE `-y` tree) **automatically** at the
   tail of the OrthoFinder job, right after the species tree is dated. 
 
-### 3. Run OrthoFinder and build the time-calibrated tree
+### Run OrthoFinder and build the time-calibrated tree
 
 `convgeno orthofinder` generates and submits the SLURM
 job(s) that run OrthoFinder. **Multi-node is the default**; single-node is
@@ -297,19 +297,19 @@ install. Advanced users can run it by hand with
 > repeatable `--calibration NAME:SP1,SP2:AGE`, plus `--nsites`, `--smoothing`,
 > `--cross-validate`, `--r8s-path`, `--dry-run`). See the same doc.
 
-### 4. Model gene-family turnover with CAFE-5
+### Model gene-family turnover with CAFE-5
 
 CAFE-5 takes the gene-family count matrix and the time-calibrated species tree
 and models where each family expands or contracts along the tree. The pipeline
 builds the CAFE-5 count matrix from OrthoFinder's orthogroups
 (`Src/Loc/scripts/prepare_cafe_inputs.py`) and pairs it with the
-`species_tree_ultrametric.nwk` from stage 3 — which is already the **binary,
-rooted, ultrametric time tree** that CAFE-5 requires. When you supplied phenotype
+`species_tree_ultrametric.nwk` produced alongside OrthoFinder — which is already
+the **binary, rooted, ultrametric time tree** that CAFE-5 requires. When you supplied phenotype
 data, CAFE also takes the `lambda_tree.nwk` (the multi-λ `-y` tree built
 automatically) so gain/loss rates can differ between trait states.
 CAFE-5 is installed separately.
 
-### 5. Associate copy number with convergent traits
+### Associate copy number with convergent traits
 
 The final stage links gene-family copy-number change to convergent phenotypes
 using a **RERconverge**-based branch-association approach, then produces summary
