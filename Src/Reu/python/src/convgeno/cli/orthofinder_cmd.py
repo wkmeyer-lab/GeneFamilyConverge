@@ -435,9 +435,9 @@ def run_submit(
 def run_generate_multinode(config_path: str, script_dir: str) -> dict:
     """Load config, validate inputs, and generate the multi-node scripts.
 
-    Returns a dict mapping script role to the on-disk script path. The v2
-    search array is not yet implemented, so only ``"prepare"`` and ``"resume"``
-    are generated; the search phase is reported as pending.
+    Returns a dict mapping script role to the on-disk script path, with all
+    three phases generated: ``"prepare"`` (``-op``), ``"search"`` (the
+    DIAMOND/BLAST array), and ``"resume"`` (``-b`` plus the tree tail steps).
     """
     config = PipelineConfig.load(config_path)
 
