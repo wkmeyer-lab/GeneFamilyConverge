@@ -8,9 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 from convgeno.external.config import OrthoFinderConfig
-from convgeno.io.fasta import FASTA_EXTENSIONS
+from convgeno.io.fasta import FASTA_EXTENSIONS, discover_fasta_files
 from convgeno.slurm.config import (
+    PhenotypeTreeConfig,
     PipelineConfig,
+    ProteomeInputConfig,
     SlurmConfig,
     SpeciesTreeConfig,
     UltrametricConfig,
@@ -162,6 +164,73 @@ def _prompt_species(message: str, available: set[str]) -> str:
         if _is_valid_species(name, available):
             return name
         _report_bad_species(name, available)
+
+
+def _prompt_proteome_input(cleaned_dir: Path) -> ProteomeInputConfig:
+    """Prompt for the RAW proteome directory the pipeline cleans first.
+
+    The first pipeline step filters each raw proteome to its longest isoform per
+    gene and writes the result into *cleaned_dir* (= ``orthofinder.input_dir``),
+    so no separate ``filter_isoforms.py`` run is needed. Pressing Enter skips
+    this: the user is then expected to stage already-cleaned proteomes in
+    *cleaned_dir* themselves. The directory is not required to exist yet — like
+    the other paths, it is read when the pipeline runs.
+    """
+    print("\n=== Raw proteomes (longest-isoform cleaning) ===")
+    print(
+        "Point the pipeline at your RAW proteomes (one protein FASTA per\n"
+        "species; .gz/.bz2 fine). The first step filters each to its longest\n"
+        "isoform per gene and writes the cleaned set to:\n"
+        f"  {cleaned_dir}\n"
+        "which is what OrthoFinder then runs on. File basenames become the\n"
+        "species tip labels everywhere downstream, so name them meaningfully\n"
+        "(e.g. 'Homo_sapiens.fa'). Press Enter to SKIP if your proteomes are\n"
+        "already cleaned and staged in that directory."
+    )
+    raw = _prompt_optional("Path to your raw proteome directory")
+    if raw is None:
+        print(
+            f"  No raw directory set: place cleaned proteomes in {cleaned_dir}\n"
+            "  yourself (the automatic cleaning step is skipped)."
+        )
+        return ProteomeInputConfig(cleaned_dir=str(cleaned_dir))
+
+    raw_path = Path(raw).expanduser()
+    if raw_path.is_dir():
+        try:
+            count = len(discover_fasta_files(raw_path))
+        except (OSError, ValueError):
+            count = 0
+        if count:
+            print(f"  Found {count} FASTA file(s) in {raw_path}.")
+        else:
+            print(
+                f"  Warning: no FASTA files (.fa/.fasta/.faa, optionally .gz/.bz2) "
+                f"found in {raw_path} yet."
+            )
+    else:
+        print(
+            f"  Note: {raw_path} does not exist yet — that's fine; it will be read\n"
+            "  when the pipeline runs. Make sure it holds one FASTA per species."
+        )
+
+    fmt = _prompt(
+        "Header format for gene-ID extraction (auto/ensembl/ncbi)", default="auto"
+    ).lower()
+    if fmt not in {"auto", "ensembl", "ncbi"}:
+        print("  Unrecognized format; using 'auto'.")
+        fmt = "auto"
+    dup = _prompt("On duplicate gene IDs (error/warn/skip)", default="error").lower()
+    if dup not in {"error", "warn", "skip"}:
+        print("  Unrecognized value; using 'error'.")
+        dup = "error"
+
+    return ProteomeInputConfig(
+        raw_dir=str(raw_path),
+        cleaned_dir=str(cleaned_dir),
+        header_format=fmt,
+        on_duplicate=dup,
+    )
 
 
 def _prompt_calibration(input_dir: Path) -> UltrametricConfig:
@@ -320,6 +389,111 @@ def _prompt_species_tree(input_dir: Path) -> SpeciesTreeConfig | None:
             path=str(tree_path.resolve()),
             is_ultrametric=verified_ultra,
             num_sites=num_sites,
+        )
+
+
+def _read_tsv_column(path: Path, column: str) -> set[str]:
+    """Return the set of non-empty values in a named TSV column (best-effort)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    if not lines:
+        return set()
+    header = lines[0].split("\t")
+    if column not in header:
+        return set()
+    idx = header.index(column)
+    values: set[str] = set()
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if idx < len(cells):
+            value = cells[idx].strip()
+            if value:
+                values.add(value)
+    return values
+
+
+def _prompt_phenotype_tree(input_dir: Path) -> PhenotypeTreeConfig | None:
+    """Prompt for an optional phenotype table for the automatic CAFE -y tree.
+
+    Returns ``None`` when the user declines (no phenotype tree is built).
+    Otherwise the TSV is checked to exist and to hold the id/phenotype columns,
+    and — when proteomes are already staged — phenotype coverage of the species
+    set is reported. Pressing Enter at the first prompt skips the feature.
+    """
+    print(
+        "\n=== Phenotype tip data (optional: automatic categorical phenotype tree) ==="
+    )
+    print(
+        "Provide a phenotype table and the pipeline will AUTOMATICALLY build the\n"
+        "categorical phenotype tree (the CAFE -y multi-lambda tree) right after the\n"
+        "species tree is made ultrametric. The table is a TSV with a column of tip\n"
+        "labels (= proteome filenames, no extension) and a phenotype column."
+    )
+    while True:
+        path_str = _prompt_optional(
+            "Path to your phenotype table (TSV) [Enter to skip]"
+        )
+        if path_str is None:
+            return None
+
+        table_path = Path(path_str).expanduser()
+        if not table_path.is_file():
+            print(f"  File not found: {table_path}")
+            continue
+
+        try:
+            first_line = table_path.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, IndexError):
+            print(f"  Could not read a header row from {table_path}")
+            continue
+        columns = first_line.rstrip("\n").split("\t")
+        if len(columns) < 2:
+            print(
+                "  This does not look tab-separated (< 2 columns in the header). "
+                "Provide a TSV."
+            )
+            continue
+
+        id_col = _prompt("Tip-label column name", default="species")
+        pheno_col = _prompt("Phenotype column name", default="phenotype")
+        missing_cols = [c for c in (id_col, pheno_col) if c not in columns]
+        if missing_cols:
+            print(
+                f"  Column(s) not in the table header: {', '.join(missing_cols)}\n"
+                f"  Available columns: {', '.join(columns)}"
+            )
+            if not _prompt_yes_no("Use this table anyway?", default=False):
+                continue
+
+        available = _proteome_species_names(input_dir)
+        if available and id_col in columns:
+            labelled = _read_tsv_column(table_path, id_col)
+            covered = available & labelled
+            missing = available - labelled
+            print(
+                f"  {len(covered)}/{len(available)} proteome species have a "
+                "phenotype in this table."
+            )
+            if missing:
+                sample = ", ".join(sorted(missing)[:8])
+                print(
+                    f"  {len(missing)} without one (they will get a 'background' "
+                    f"class): {sample}"
+                )
+
+        model = _prompt("ASR rate model — ER, SYM, or ARD", default="ER")
+        model = model.strip().upper()
+        if model not in {"ER", "SYM", "ARD"}:
+            print(f"  Unrecognized model '{model}'; using ER.")
+            model = "ER"
+
+        return PhenotypeTreeConfig(
+            table=str(table_path.resolve()),
+            id_col=id_col,
+            pheno_col=pheno_col,
+            model=model,
         )
 
 
@@ -591,9 +765,15 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     )
     project_path = Path(project_dir)
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Raw proteomes -> cleaned proteomes. The cleaned directory IS OrthoFinder's
+    # input dir, so the longest-isoform filter runs automatically as step 1.
+    cleaned_dir = project_path / "Data/interim/cleaned_proteomes"
+    proteome_input = _prompt_proteome_input(cleaned_dir)
+
     # output_dir is filled in per mode when the two configs are written below.
     orthofinder = OrthoFinderConfig(
-        input_dir=str(project_path / "Data/interim/cleaned_proteomes"),
+        input_dir=proteome_input.cleaned_dir,
         output_dir="",
         search_threads=search_threads,
         analysis_threads=analysis_threads,
@@ -609,6 +789,8 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         ultrametric = UltrametricConfig()
     else:
         ultrametric = _prompt_calibration(Path(orthofinder.input_dir))
+
+    phenotype_tree = _prompt_phenotype_tree(Path(orthofinder.input_dir))
 
     # ---- Detect conda runtime configuration ----
     print("\n=== Detecting conda runtime ===\n")
@@ -651,10 +833,12 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         project_dir=project_dir,
         conda_env=conda_env,
         slurm=slurm,
+        proteome_input=proteome_input,
         orthofinder=orthofinder,
         runtime=runtime_config,
         ultrametric=ultrametric,
         species_tree=species_tree,
+        phenotype_tree=phenotype_tree,
     )
 
     # One config per execution mode, each with a mode-named output_dir sharing
@@ -678,6 +862,18 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
     print("Summary:")
     print(f"  Project directory:  {project_dir}")
     print(f"  Conda environment:  {conda_env}")
+    if proteome_input.has_raw():
+        print(f"  Raw proteomes:      {proteome_input.raw_dir}")
+        print(f"                      -> cleaned to {proteome_input.cleaned_dir}")
+        print(
+            f"                      format={proteome_input.header_format}, "
+            f"on-duplicate={proteome_input.on_duplicate}"
+        )
+    else:
+        print(
+            "  Raw proteomes:      none "
+            f"(expects cleaned proteomes already in {proteome_input.cleaned_dir})"
+        )
     print(f"  SLURM partition:    {partition_name}")
     print(f"  CPUs per task:      {cpus_per_task}")
     print(f"  Time limit:         {time_limit}")
@@ -711,6 +907,14 @@ def run_init(output_path: str = "pipeline_config.yaml") -> None:
         print("  r8s calibration:    n/a (ultrametric tree supplied)")
     else:
         print("  r8s calibration:    none (relative-time, root-anchored)")
+    if phenotype_tree is not None and phenotype_tree.has_table():
+        print(f"  Phenotype tree:     auto CAFE -y from {phenotype_tree.table}")
+        print(
+            f"                      cols {phenotype_tree.id_col} -> "
+            f"{phenotype_tree.pheno_col}, model {phenotype_tree.model}"
+        )
+    else:
+        print("  Phenotype tree:     none (no phenotype table given)")
     if runtime_config is not None:
         print(f"  Conda module:       {runtime_config.conda_module or '(none)'}")
         print(f"  Conda base:         {runtime_config.conda_base}")

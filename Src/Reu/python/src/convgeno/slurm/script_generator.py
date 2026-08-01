@@ -10,6 +10,7 @@ from convgeno.slurm.runtime import (
     CondaRuntimeConfig,
     render_conda_bootstrap,
     render_mafft_msa_shim,
+    render_phenotype_tree_autostep,
     render_ultrametric_autostep,
 )
 
@@ -230,6 +231,18 @@ echo "This is persistent scratch and will be removed by the cluster's purge poli
         num_sites=species_tree.num_sites if species_tree else None,
         species_dir=config.orthofinder.input_dir,
     )
+    # Auto categorical phenotype tree (CAFE -y): appended right after the
+    # ultrametric step so it reconstructs on species_tree_ultrametric.nwk. Only
+    # emitted when a phenotype table was configured at init; non-fatal.
+    pheno = config.phenotype_tree
+    if pheno is not None and pheno.has_table():
+        ultrametric_block += "\n" + render_phenotype_tree_autostep(
+            config.project_dir,
+            phenotype_table=pheno.table,
+            id_col=pheno.id_col,
+            pheno_col=pheno.pheno_col,
+            model=pheno.model,
+        )
 
     script = f"""\
 #!/bin/bash

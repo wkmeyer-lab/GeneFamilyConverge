@@ -79,6 +79,30 @@ class TestUltrametricAutostep:
         assert "--root-age 1" in script
         assert "--calibration" not in script
 
+    def test_phenotype_tree_step_included_when_configured(self, sample_config):
+        import dataclasses
+
+        from convgeno.slurm.config import PhenotypeTreeConfig
+
+        cfg = dataclasses.replace(
+            sample_config,
+            phenotype_tree=PhenotypeTreeConfig(
+                table="/data/phenotypes.tsv", id_col="species", pheno_col="diet"
+            ),
+        )
+        script = generate_orthofinder_script(cfg)
+        assert "make_categorical_phenotype_tree.R" in script
+        assert '--phenotypes "/data/phenotypes.tsv"' in script
+        assert '--pheno-col "diet"' in script
+        # emitted AFTER the ultrametric step (needs its output tree)
+        assert script.index("make_tree_ultrametric.py") < script.index(
+            "make_categorical_phenotype_tree.R"
+        )
+
+    def test_no_phenotype_tree_step_without_table(self, sample_config):
+        script = generate_orthofinder_script(sample_config)
+        assert "make_categorical_phenotype_tree.R" not in script
+
     def test_user_ultrametric_tree_uses_assume_mode(self, sample_config):
         import dataclasses
 

@@ -23,8 +23,10 @@
 #
 # Sources reusable R functions from Src/Reu/r/categorical_phenotype_tree.R
 #
-# Requires: ape, RERconverge (or --rer-functions / phenotype_tree.rer_functions
-# pointing at the lab's RERConvergeFunctions.R), and yaml (only when --config is used).
+# Requires: ape + castor + expm (the vendored ASR engine in Src/Reu/r/anc_recon.R;
+# no RERconverge needed) and yaml (only when --config is used). Optionally set
+# --rer-functions / phenotype_tree.rer_functions to the lab's RERConvergeFunctions.R
+# to override the vendored getAncLiks.
 #
 # Usage:
 #   Rscript Src/Loc/scripts/make_categorical_phenotype_tree.R \
@@ -112,6 +114,15 @@ run <- function(argv) {
   opts <- parse_cli(argv)
   cfg <- load_yaml(opts$config)
 
+  # Respect phenotype_tree.enabled so the workflows can call this step
+  # unconditionally (like the other pipeline steps). Absent/true -> run.
+  enabled <- opts$enabled %||% dig(cfg, "phenotype_tree", "enabled")
+  if (isFALSE(enabled) ||
+      (is.character(enabled) && tolower(enabled) %in% c("false", "no", "0", "off"))) {
+    cat("phenotype_tree.enabled is false; skipping the categorical phenotype tree step.\n")
+    return(invisible(0))
+  }
+
   if (!requireNamespace("ape", quietly = TRUE)) {
     stop("The 'ape' package is required.", call. = FALSE)
   }
@@ -132,6 +143,16 @@ run <- function(argv) {
     stop(sprintf("Cannot find helper %s (set --reu-dir).", helper), call. = FALSE)
   }
   source(helper)
+
+  # Vendored ancestral-state-reconstruction engine (getAncLiks); makes the step
+  # depend on castor + expm instead of the whole RERconverge package. The optional
+  # --rer-functions below can override this with the lab's RERConvergeFunctions.R.
+  anc <- file.path(reu_dir, "anc_recon.R")
+  if (!file.exists(anc)) {
+    stop(sprintf("Cannot find %s (the vendored ASR engine; set --reu-dir).", anc),
+         call. = FALSE)
+  }
+  source(anc)
 
   # Optionally source the lab's RERConvergeFunctions.R so getAncLiks() is
   # available when the RERconverge package is not installed.

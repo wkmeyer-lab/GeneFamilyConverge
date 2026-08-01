@@ -52,7 +52,7 @@ r8s scales the OrthoFinder species tree to time from ONE calibration:
 two species and their divergence time in millions of years. Name each
 species EXACTLY as its proteome file basename (no extension), e.g.
 'Homo_sapiens'.
-  12 proteome species found in Data/interim/proteomes_filtered.
+  12 proteome species found in Data/interim/cleaned_proteomes.
 First calibration species (press Enter to skip): Homo_sapiens
 Second calibration species: Felis_catus
 Divergence time between them (millions of years): 94

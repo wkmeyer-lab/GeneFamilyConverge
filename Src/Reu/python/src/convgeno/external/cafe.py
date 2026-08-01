@@ -23,6 +23,8 @@ import logging
 import shlex
 from pathlib import Path
 
+from Bio import Phylo
+
 from convgeno.io.tables import read_gene_counts, read_tsv, write_tsv
 from convgeno.validation.trees import (
     check_tips_match_species,
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "format_gene_counts_for_cafe",
     "validate_input",
+    "validate_lambda_tree",
     "validate_output",
     "build_command",
 ]
@@ -179,6 +182,58 @@ def validate_input(count_file: Path | str, tree_file: Path | str) -> list[str]:
     return errors
 
 
+def validate_lambda_tree(
+    lambda_tree: Path | str, species_tree: Path | str
+) -> list[str]:
+    """Validate a CAFE-5 ``-y`` (multi-lambda) tree against the ``-t`` tree.
+
+    The ``-y`` tree is a categorical phenotype tree: the same rooted, binary
+    topology as the species (``-t``) tree, but with integer rate-class ids in the
+    branch-length slot. This checks it parses/roots/is-binary, its tips match the
+    species tree exactly, and every branch label is an integer.
+
+    Returns
+    -------
+    list[str]
+        Error messages; empty means the ``-y`` tree is valid.
+    """
+    errors: list[str] = validate_tree(lambda_tree)
+
+    try:
+        t_tips = [
+            tip.name for tip in Phylo.read(str(species_tree), "newick").get_terminals()
+        ]
+    except Exception as exc:  # noqa: BLE001 - report any parse failure uniformly
+        errors.append(f"Could not read species tree {species_tree}: {exc}")
+        return errors
+
+    only_lambda, only_species = check_tips_match_species(lambda_tree, t_tips)
+    if only_lambda:
+        errors.append(f"Species in -y tree but not in -t tree: {sorted(only_lambda)}")
+    if only_species:
+        errors.append(f"Species in -t tree but not in -y tree: {sorted(only_species)}")
+
+    try:
+        ytree = Phylo.read(str(lambda_tree), "newick")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Could not read -y tree {lambda_tree}: {exc}")
+        return errors
+
+    non_integer = [
+        clade.branch_length
+        for clade in ytree.find_clades()
+        if clade.branch_length is not None
+        and float(clade.branch_length) != int(clade.branch_length)
+    ]
+    if non_integer:
+        errors.append(
+            "The -y tree must carry INTEGER rate-class ids in the branch-length "
+            f"slot; found non-integer value(s): {non_integer[:5]}."
+        )
+
+    return errors
+
+
 def validate_output(output_dir: Path | str) -> list[str]:
     """Lightweight check that a CAFE-5 run produced results.
 
@@ -202,9 +257,17 @@ def build_command(
     n_gamma_cats: int | None = None,
     extra_args: list[str] | str | None = None,
     tool_path: str = "cafe5",
+    lambda_tree: Path | str | None = None,
 ) -> list[str]:
-    """Build the CAFE-5 command: ``cafe5 -i <counts> -t <tree> [-k K] [extra]``."""
+    """Build the CAFE-5 command.
+
+    ``cafe5 -i <counts> -t <tree> [-y <lambda_tree>] [-k K] [extra]``. When
+    ``lambda_tree`` is given (a categorical phenotype tree with integer rate-class
+    ids in the branch-length slot), CAFE-5 estimates a separate lambda per class.
+    """
     cmd = [str(tool_path), "-i", str(count_file), "-t", str(tree_file)]
+    if lambda_tree:
+        cmd += ["-y", str(lambda_tree)]
     if n_gamma_cats:
         cmd += ["-k", str(n_gamma_cats)]
     if extra_args:

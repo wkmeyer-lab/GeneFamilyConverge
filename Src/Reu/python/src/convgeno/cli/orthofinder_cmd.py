@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -221,6 +223,136 @@ def submit_sbatch(
     )
 
 
+# ---------------------------------------------------------------------------
+#  --wait: block until a submitted job (chain) reaches a terminal state.
+#
+#  This is what lets Snakemake treat OrthoFinder as one blocking DAG node while
+#  the proven multi-node afterok chain runs underneath (see workflow/Snakefile).
+# ---------------------------------------------------------------------------
+
+_TERMINAL_OK = {"COMPLETED"}
+_TERMINAL_FAIL = {
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "OUT_OF_MEMORY",
+    "NODE_FAIL",
+    "BOOT_FAIL",
+    "DEADLINE",
+    "PREEMPTED",
+    "REVOKED",
+}
+
+
+def _normalize_state(raw: str) -> str:
+    """Normalize a sacct State field, e.g. 'CANCELLED by 12345' / 'COMPLETED+'."""
+    token = raw.strip().split()[0] if raw.strip() else ""
+    return token.rstrip("+").upper()
+
+
+def sacct_job_state(job_id: str) -> str | None:
+    """Return the primary SLURM state of *job_id* via sacct, or ``None``.
+
+    Uses ``sacct -X`` (the allocation only, no ``.batch``/``.extern`` steps).
+    Returns ``None`` when sacct reports nothing yet (the job may not have
+    reached the accounting database) or when sacct is unavailable/errors, so
+    callers can keep polling. When several rows are reported (an array job),
+    the verdict is: any still-active row wins, else any failed row wins, else
+    COMPLETED.
+    """
+    try:
+        result = subprocess.run(
+            ["sacct", "-j", str(job_id), "-n", "-X", "-o", "State"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    states = [
+        _normalize_state(line)
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    states = [s for s in states if s]
+    if not states:
+        return None
+    active = [s for s in states if s not in _TERMINAL_OK and s not in _TERMINAL_FAIL]
+    if active:
+        return active[0]
+    failed = [s for s in states if s in _TERMINAL_FAIL]
+    if failed:
+        return failed[0]
+    return "COMPLETED"
+
+
+def wait_for_completion(
+    job_id: str,
+    poll_interval: int = 30,
+    max_unknown_polls: int = 40,
+    *,
+    sleep=time.sleep,
+    state_fn=None,
+) -> int:
+    """Block until *job_id* is terminal. Return 0 on COMPLETED, else 1.
+
+    Returns 1 on any terminal failure state, or if sacct never reports a state
+    after *max_unknown_polls* consecutive unknown polls (so a job that never
+    registers cannot hang the wait forever).
+    """
+    state_fn = state_fn or sacct_job_state
+    unknown = 0
+    while True:
+        state = state_fn(job_id)
+        if state is None:
+            unknown += 1
+            if unknown > max_unknown_polls:
+                print(
+                    f"WARNING: sacct never reported a state for job {job_id} "
+                    f"after {unknown} polls; stopping wait."
+                )
+                return 1
+            sleep(poll_interval)
+            continue
+        unknown = 0
+        if state in _TERMINAL_OK:
+            return 0
+        if state in _TERMINAL_FAIL:
+            return 1
+        sleep(poll_interval)
+
+
+def _await_job(
+    job_id: str,
+    poll_interval: int,
+    *,
+    label: str = "job",
+    chain_ids: list[str] | None = None,
+) -> None:
+    """Wait for *job_id*; ``sys.exit(1)`` on failure. Requires ``sacct``."""
+    if shutil.which("sacct") is None:
+        print(
+            "ERROR: --wait requires 'sacct' (SLURM accounting) to poll job "
+            "state, but sacct was not found on PATH."
+        )
+        sys.exit(1)
+    print(
+        f"Waiting for {label} {job_id} to finish "
+        f"(polling sacct every {poll_interval}s)..."
+    )
+    rc = wait_for_completion(job_id, poll_interval)
+    if rc == 0:
+        print(f"{label} {job_id} COMPLETED.")
+        return
+    print(f"ERROR: {label} {job_id} did not complete successfully.")
+    if chain_ids:
+        for jid in chain_ids:
+            print(f"  job {jid}: {sacct_job_state(jid) or 'unknown'}")
+    sys.exit(1)
+
+
 def run_generate(config_path: str, script_path: str) -> Path:
     """Load config, generate the OrthoFinder SLURM script, and write it to disk.
 
@@ -258,8 +390,15 @@ def run_submit(
     config_path: str,
     script_path: str,
     skip_confirm: bool = False,
+    wait: bool = False,
+    poll_interval: int = 30,
 ) -> None:
-    """Generate the OrthoFinder SLURM script, optionally show it for approval, and submit via sbatch."""
+    """Generate the OrthoFinder SLURM script, optionally show it for approval, and submit via sbatch.
+
+    When *wait* is True, block until the job reaches a terminal state (polling
+    sacct) and ``sys.exit(1)`` if it did not complete. This makes the command
+    usable as a blocking step in a workflow orchestrator (``convgeno run``).
+    """
     path = run_generate(config_path, script_path)
 
     if not skip_confirm:
@@ -289,13 +428,16 @@ def run_submit(
     print(f"  Monitor: squeue -j {sr.job_id}")
     print(f"  Cancel:  scancel {sr.job_id}")
 
+    if wait:
+        _await_job(sr.job_id, poll_interval, label="OrthoFinder job")
+
 
 def run_generate_multinode(config_path: str, script_dir: str) -> dict:
     """Load config, validate inputs, and generate the multi-node scripts.
 
-    Returns a dict mapping script role to the on-disk script path. The v2
-    search array is not yet implemented, so only ``"prepare"`` and ``"resume"``
-    are generated; the search phase is reported as pending.
+    Returns a dict mapping script role to the on-disk script path, with all
+    three phases generated: ``"prepare"`` (``-op``), ``"search"`` (the
+    DIAMOND/BLAST array), and ``"resume"`` (``-b`` plus the tree tail steps).
     """
     config = PipelineConfig.load(config_path)
 
@@ -352,8 +494,15 @@ def run_submit_multinode(
     config_path: str,
     script_dir: str,
     skip_confirm: bool = False,
+    wait: bool = False,
+    poll_interval: int = 30,
 ) -> None:
-    """Generate and submit the three-job multi-node OrthoFinder dependency chain."""
+    """Generate and submit the three-job multi-node OrthoFinder dependency chain.
+
+    When *wait* is True, block until the terminal (resume) job reaches a final
+    state and ``sys.exit(1)`` if the chain did not complete — so this can serve
+    as one blocking step in a workflow orchestrator (``convgeno run``).
+    """
     paths = run_generate_multinode(config_path, script_dir)
 
     if not skip_confirm:
@@ -407,3 +556,11 @@ def run_submit_multinode(
     print("")
     print("Monitor all: squeue -u $USER")
     print(f"Cancel all:  scancel {sr_a.job_id} {sr_b.job_id} {sr_c.job_id}")
+
+    if wait:
+        _await_job(
+            sr_c.job_id,
+            poll_interval,
+            label="OrthoFinder resume job",
+            chain_ids=[sr_a.job_id, sr_b.job_id, sr_c.job_id],
+        )

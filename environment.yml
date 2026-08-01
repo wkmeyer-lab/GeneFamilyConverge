@@ -25,14 +25,31 @@ dependencies:
   - fastme
   - mafft
 
+  # --- R stack for the categorical phenotype tree (CAFE -y) step ---
+  # All on conda-forge, so R lives IN this env (unlike r8s below): a single
+  # `conda activate convgeno` then provides OrthoFinder AND the R phenotype-tree
+  # step, so the automatic post-OrthoFinder step runs end-to-end with no extra
+  # setup. See tools/r-deps/ for installing these into an external/module R
+  # instead (e.g. local dev without conda).
+  - r-base >=4.2
+  - r-ape
+  - r-castor
+  - r-expm
+  - r-yaml
+
   # --- testing & linting ---
   - pytest >=7.0
   - pytest-cov
 
-  # --- pipeline tools (uncomment as needed) ---
+  # --- workflow orchestration (the `convgeno run` DAG driver) ---
+  # Snakemake 8 drives the end-to-end DAG; the SLURM executor plugin lets it
+  # submit each stage as a cluster job. Both are required by `convgeno run`.
+  - snakemake-minimal >=8
+  - snakemake-executor-plugin-slurm
+
+  # --- optional pipeline tools (uncomment as needed) ---
   # - blast >=2.14
   # - hmmer >=3.3
-  # - snakemake >=8.0
 
   # NOTE: r8s (ultrametric step) is NOT on conda — build it from source with
   #   ./tools/r8s/install_r8s.sh   (see tools/r8s/README.md)

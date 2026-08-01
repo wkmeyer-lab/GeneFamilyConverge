@@ -15,6 +15,10 @@ The pipeline is command-line driven through the `convgeno` tool plus a small set
 of stage scripts. This README tells you how to install it, what each stage does,
 and how to run them.
 
+> If GeneFamilyConverge is useful to you, please **⭐ star** or **fork** the
+> [repository](https://github.com/wkmeyer-lab/GeneFamilyConverge) — it helps
+> others find it.
+
 ---
 
 ## Contents
@@ -24,11 +28,12 @@ and how to run them.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Usage](#usage)
-  - [1. Filter isoforms](#1-filter-isoforms)
-  - [2. Set up your run (`convgeno init`)](#2-set-up-your-run-convgeno-init)
-  - [3. Run OrthoFinder and build the time-calibrated tree](#3-run-orthofinder-and-build-the-time-calibrated-tree)
-  - [4. Model gene-family turnover with CAFE-5](#4-model-gene-family-turnover-with-cafe-5)
-  - [5. Associate copy number with convergent traits](#5-associate-copy-number-with-convergent-traits)
+  - [Run the whole pipeline (`convgeno run`)](#run-the-whole-pipeline-convgeno-run)
+  - [Filter isoforms](#filter-isoforms)
+  - [Set up your run (`convgeno init`)](#set-up-your-run-convgeno-init)
+  - [Run OrthoFinder and build the time-calibrated tree](#run-orthofinder-and-build-the-time-calibrated-tree)
+  - [Model gene-family turnover with CAFE-5](#model-gene-family-turnover-with-cafe-5)
+  - [Associate copy number with convergent traits](#associate-copy-number-with-convergent-traits)
   - [Calibrating DIAMOND throughput](#calibrating-diamond-throughput)
 - [Inputs and outputs](#inputs-and-outputs)
 - [Configuration](#configuration)
@@ -41,32 +46,39 @@ and how to run them.
 
 ## The pipeline at a glance
 
+A single `convgeno run` executes this whole chain as a DAG on your cluster:
+
 ```
    proteomes                one FASTA per species
        │
        ▼
- (1) filter isoforms        longest protein per gene            convgeno / filter_isoforms.py
+   filter isoforms          longest protein per gene            convgeno / filter_isoforms.py
        │
        ▼
- (2) OrthoFinder            gene families (orthogroups)         convgeno orthofinder
+   OrthoFinder              gene families (orthogroups)         convgeno orthofinder
        │  + species tree
        ▼
- (2b) r8s                   ultrametric, time-calibrated        (runs automatically with OrthoFinder)
+   r8s                      ultrametric, time-calibrated        (runs automatically with OrthoFinder)
        │                    species tree
        ▼
- (3) CAFE-5                 gene-family expansion / contraction
+   phenotype tree           categorical phenotype tree =        (runs automatically with OrthoFinder)
+       │                    CAFE -y multi-λ rate tree
+       ▼
+   CAFE-5                   gene-family expansion / contraction
        │
        ▼
- (4) R analysis             copy-number change ↔ convergent      RERconverge-based association
+   R analysis               copy-number change ↔ convergent      RERconverge-based association
                             phenotype
 ```
 
 The scientific question is whether **shifts in gene-family copy number** line up
 with **independently evolved (convergent) phenotypes** — for example, whether a
 gene family repeatedly expands in lineages that share a diet or habitat.
-OrthoFinder defines the gene families, r8s scales the species tree to time,
-CAFE-5 models where families expand and contract, and a downstream R step links
-those changes to convergent traits.
+OrthoFinder defines the gene families, r8s scales the species tree to time, a
+categorical phenotype tree maps each trait state onto the branches (the CAFE
+`-y` tree), CAFE-5 models where families expand and contract — optionally at a
+separate rate per trait state — and a downstream R step links those changes to
+convergent traits.
 
 ---
 
@@ -94,74 +106,144 @@ those changes to convergent traits.
 
 - **CAFE-5** — installed separately (see the CAFE-5 project). Used by the
   turnover-modeling stage.
-- **R** with the packages used downstream: **RERconverge** (see note below),
-  **ape**, **castor**, **ggplot2**, and **ggtree**.
+- **R** for the downstream R steps — **included in the `convgeno` conda env**
+  (`environment.yml` adds `r-base` + **ape**, **castor**, **expm**, **yaml**), so a
+  single `conda activate convgeno` covers OrthoFinder *and* the automatic
+  categorical phenotype tree (CAFE `-y`) step end-to-end. Its ancestral-state
+  reconstruction is vendored (`Src/Reu/r/anc_recon.R`), so **RERconverge is not
+  required**. To run that step against an external/module-provided R without conda,
+  install the same stack with [`tools/r-deps/`](tools/r-deps/README.md). The planned
+  association stage additionally uses **RERconverge**, **ggplot2**, and **ggtree**
+  (see note below).
 
-> **RERconverge:** the association stage targets the Meyer Lab's RERconverge
-> functions (e.g. `getAncLiks`, `char2TreeCategorical`), which live in
-> the lab fork rather than the CRAN/official release. Install/attach that build,
-> or source the lab's `RERConvergeFunctions.R`.
+> **RERconverge (optional here):** the vendored engine already reproduces the
+> Meyer Lab reconstruction (`getAncLiks`). To run the lab's own build instead —
+> or for the association stage that targets its functions — install/attach
+> RERconverge (the lab fork, not the CRAN/official release) or source the lab's
+> `RERConvergeFunctions.R` and set `phenotype_tree.rer_functions`.
 
 ---
 
 ## Installation
 
+### 1. Get the code
+
+Clone the repository onto your cluster (or fork it first to have your own copy):
+
 ```bash
-# 1. Create and activate the conda environment (installs OrthoFinder + friends)
-conda env create -f environment.yml
+git clone https://github.com/wkmeyer-lab/GeneFamilyConverge.git
+cd GeneFamilyConverge
+```
+
+### 2. Create the `convgeno` environment
+
+```bash
+./scripts/setup_env.sh       # run this from a login node
 conda activate convgeno
-
-# 2. Editable-install the convgeno Python package (also provides the CLI)
-pip install -e Src/Reu/python/
 ```
 
-The environment is named **`convgeno`** and provides the `convgeno` command-line
-tool. Then, once, build r8s for the dating step:
+`setup_env.sh` installs everything the pipeline needs — OrthoFinder and its
+friends, the R stack, Snakemake, and the `convgeno` command itself. It sets the
+environment up on a **compute node** (the dependency solve needs more memory
+than a login node allows), so just run it from the login node and it takes care
+of the rest. Already inside an interactive job, or on a personal machine? Add
+`--here`. Run `./scripts/setup_env.sh --help` for the other options
+(`--partition`, `--mem`, `--time`, `--conda-module`, …).
+
+### 3. Build r8s for the dated tree (once)
 
 ```bash
-# See tools/r8s/README.md for module/toolchain details
-./tools/r8s/install_r8s.sh
+./tools/r8s/install_r8s.sh   # see tools/r8s/README.md for toolchain details
 ```
+
+r8s is optional — without it OrthoFinder still runs and the dating step is
+simply skipped.
 
 ---
 
 ## Quick start
 
-From a login node with the environment active:
+From a login node, with the environment installed (see
+[Installation](#installation)):
 
 ```bash
-# 1. Clean your proteomes: keep the longest protein per gene, one FASTA per species
-python Src/Loc/scripts/filter_isoforms.py dir raw_proteomes/ cleaned_proteomes/
-
-# 2. One-time interactive setup: detects your cluster and writes pipeline_config.yaml
+# One-time interactive setup — point it at your raw proteomes, cluster,
+# calibration, and phenotype table. Writes pipeline_config.yaml.
 convgeno init
 
-# 3. Generate + submit the OrthoFinder workflow (multi-node is the default)
-convgeno orthofinder run          # shows the scripts, then asks to submit
-#   …or skip the prompt:
-convgeno orthofinder run -y
+# Run the WHOLE pipeline as one DAG:
+#   clean proteomes → OrthoFinder → time-calibrated tree → phenotype tree → CAFE-5
+convgeno run              # submits a small orchestrator job that drives the DAG
+#   …preview the plan first, without submitting anything:
+convgeno run -n
+#   …or drive it yourself from an interactive node:
+convgeno run --local
 
-# 4. Watch it
+# Watch it
 squeue -u "$USER"
 ```
 
-Results land in the `orthofinder.output_dir` from your config, and — if r8s is
-installed and you gave a calibration during `init` — a time-calibrated
-`species_tree_ultrametric.nwk` appears alongside them.
+A single `convgeno run` fans the pipeline out across the cluster and leaves the
+results in your project's `Data/` tree — OrthoFinder orthogroups, the
+time-calibrated `species_tree_ultrametric.nwk`, the CAFE `-y` `lambda_tree.nwk`,
+and CAFE-5's gene-family turnover results. Under the hood it is a
+[Snakemake](https://snakemake.github.io) workflow (`workflow/Snakefile`); you can
+also run any stage on its own (see [Usage](#usage)).
 
 ---
 
 ## Usage
 
 Run everything from the repository root, with the `convgeno` environment active.
+The normal path is two commands — `convgeno init` once, then `convgeno run`. The
+sections after that document each stage for running it on its own.
 
-### 1. Filter isoforms
+### Run the whole pipeline (`convgeno run`)
 
-OrthoFinder expects one clean FASTA per species with a
-single representative protein per gene. This step reduces each proteome to its
-**longest isoform per gene**. It streams gzip/bz2 inputs transparently,
-auto-detects Ensembl vs NCBI headers, and has a low-memory mode for very large
-proteomes.
+`convgeno run` executes the entire DAG — clean proteomes → OrthoFinder →
+time-calibrated tree → phenotype tree → CAFE-5 inputs → CAFE-5 — using the
+settings from `convgeno init`.
+
+```bash
+convgeno run                 # submit an orchestrator job that drives the whole DAG
+convgeno run -n              # dry run: print the planned DAG, submit nothing
+convgeno run --local         # run the driver in the foreground (interactive node)
+convgeno run --single-node   # use the single-node OrthoFinder path inside the DAG
+```
+
+| Flag | Meaning |
+|---|---|
+| `-n`, `--dry-run` | Print the planned DAG and exit without submitting anything. |
+| `--local` | Run Snakemake in the foreground on the current node (e.g. inside an `srun` allocation) instead of submitting an orchestrator job. |
+| `--mode {multinode,single-node}` / `--multinode` / `--single-node` | OrthoFinder execution mode inside the DAG (default `multinode`). |
+| `--jobs N` | Max concurrent cluster jobs Snakemake keeps in flight (default 8). |
+| `--config PATH` | Config file to use (default: the mode-specific `pipeline_config_<mode>.yaml`). |
+| `-y`, `--yes` | Submit the orchestrator job without the confirmation prompt. |
+
+By default `convgeno run` submits a small, long-walltime **orchestrator job**
+that runs the workflow and fans the heavy steps out across the cluster — so you
+never run a long process on the login node (the same limit that can kill a big
+conda solve). It is a [Snakemake](https://snakemake.github.io) workflow
+(`workflow/Snakefile`); OrthoFinder is wrapped so its multi-node chain still runs
+as before, and CAFE-5 is submitted as its own cluster job.
+
+### Filter isoforms
+
+OrthoFinder expects one clean FASTA per species with a single representative
+protein per gene. This step reduces each proteome to its **longest isoform per
+gene**. It streams gzip/bz2 inputs transparently, auto-detects Ensembl vs NCBI
+headers, and has a low-memory mode for very large proteomes.
+
+**This runs automatically** as the first step of `convgeno run` when you gave
+`convgeno init` a raw-proteome directory. To run it on its own, use `convgeno
+clean` (reads the paths from your config), or the lower-level `filter_isoforms.py`:
+
+```bash
+# Config-driven: clean proteome_input.raw_dir -> proteome_input.cleaned_dir
+convgeno clean
+# …or explicit directories:
+convgeno clean <raw_dir> <cleaned_dir> [--format auto] [--on-duplicate error]
+```
 
 ```bash
 # Batch: one FASTA per species in a directory -> a directory of filtered FASTAs
@@ -185,7 +267,7 @@ Tip labels downstream come from the **file basename** (without extension), so
 name each output file for its species — e.g. `Homo_sapiens.fa`. Recognized
 extensions are `.fa`, `.fasta`, and `.faa`.
 
-### 2. Set up your run (`convgeno init`)
+### Set up your run (`convgeno init`)
 
 `convgeno init` is a one-time interactive wizard. It probes
 your cluster (partitions, cores, memory, scratch) and records the absolute conda
@@ -197,9 +279,15 @@ convgeno init                 # writes ./pipeline_config.yaml
 convgeno init --output my_config.yaml
 ```
 
-During setup you also choose how the **species tree** is supplied and (optionally)
-give one **divergence-time calibration** so the tree can be dated in real time:
+During setup you point the pipeline at your **raw proteomes**, choose how the
+**species tree** is supplied, (optionally) give one **divergence-time
+calibration** so the tree can be dated in real time, and point it at your
+**phenotype tip data**:
 
+- **Raw proteomes** — the directory of raw protein FASTAs (one per species;
+  `.gz`/`.bz2` fine). `convgeno run` filters each to its longest isoform per gene
+  first, so no separate cleaning step is needed. Press Enter to skip if your
+  proteomes are already cleaned and staged.
 - **Species tree** — let OrthoFinder build it (default), or bring your own
   (ultrametric or not). See
   [`docs/species_tree/species_tree.md`](docs/species_tree/species_tree.md) for
@@ -209,8 +297,12 @@ give one **divergence-time calibration** so the tree can be dated in real time:
   tree. You can skip it (you get a relative-time tree) or add several
   calibrations later in the config. The full walkthrough is in
   [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md).
+- **Phenotype tip data** — point `init` at a TSV of tip labels and
+  their phenotype (diet, habitat, …). When you provide one, the pipeline builds
+  the **categorical phenotype tree** (the CAFE `-y` tree) **automatically** at the
+  tail of the OrthoFinder job, right after the species tree is dated. 
 
-### 3. Run OrthoFinder and build the time-calibrated tree
+### Run OrthoFinder and build the time-calibrated tree
 
 `convgeno orthofinder` generates and submits the SLURM
 job(s) that run OrthoFinder. **Multi-node is the default**; single-node is
@@ -262,23 +354,48 @@ step never risks your OrthoFinder results: it runs only after OrthoFinder has
 already succeeded, and if r8s is missing it is skipped with a clear message. See
 [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md).
 
+**The phenotype tree, too.** If you gave `init` a phenotype table, the same job
+tail then builds the **categorical phenotype tree** — the species-tree topology
+with every branch labelled by an integer trait state (tips from your table,
+internal branches inferred by ancestral-state reconstruction). Written as
+`lambda_tree.nwk` beside the dated tree, it is exactly the CAFE-5 `-y` multi-λ
+tree that lets gene gain/loss rates differ between trait states. Like the r8s
+step it is non-fatal and skips cleanly if R or the table is unavailable. Its
+reconstruction reuses the Meyer-lab RERconverge engine, vendored so only a small
+R stack is needed — and that stack ships in the conda env, so nothing extra to
+install. Advanced users can run it by hand with
+`Src/Loc/scripts/make_categorical_phenotype_tree.R --config …`.
+
 > Advanced users can run the dating step by hand with
 > `Src/Loc/scripts/make_tree_ultrametric.py` (`-p 'sp1,sp2' -c <Myr>`, or
 > repeatable `--calibration NAME:SP1,SP2:AGE`, plus `--nsites`, `--smoothing`,
 > `--cross-validate`, `--r8s-path`, `--dry-run`). See the same doc.
 
-### 4. Model gene-family turnover with CAFE-5
+### Model gene-family turnover with CAFE-5
 
 CAFE-5 takes the gene-family count matrix and the time-calibrated species tree
-and models where each family expands or contracts along the tree. The pipeline
-builds the CAFE-5 count matrix from OrthoFinder's orthogroups
-(`Src/Loc/scripts/prepare_cafe_inputs.py`) and pairs it with the
-`species_tree_ultrametric.nwk` from stage 3 — which is already the **binary,
-rooted, ultrametric time tree** that CAFE-5 requires. For categorical
-phenotypes, a helper builds the multi-λ (`-y`) rate tree CAFE-5 uses to let
-gain/loss rates differ between trait states. CAFE-5 is installed separately.
+and models where each family expands or contracts along the tree. **This is the
+final step of `convgeno run`** — it builds the CAFE-5 count matrix from
+OrthoFinder's orthogroups (`Src/Loc/scripts/prepare_cafe_inputs.py`), pairs it
+with the `species_tree_ultrametric.nwk` produced alongside OrthoFinder (already
+the **binary, rooted, ultrametric time tree** CAFE-5 requires), and runs CAFE-5
+as its own cluster job. When you supplied phenotype data, CAFE also takes the
+`lambda_tree.nwk` (the multi-λ `-y` tree built automatically) so gain/loss rates
+can differ between trait states. Results land in
+`Data/processed/cafe_results/`.
 
-### 5. Associate copy number with convergent traits
+CAFE-5 is **not on conda** — install it separately and put it on `PATH` (see the
+CAFE-5 project). To run just this step by hand:
+
+```bash
+python Src/Loc/scripts/run_cafe.py \
+    --counts Data/interim/cafe_input/cafe_input.tsv \
+    --tree   Data/interim/cafe_input/species_tree.nwk \
+    [--lambda-tree <…>/lambda_tree.nwk] \
+    --output-dir Data/processed/cafe_results
+```
+
+### Associate copy number with convergent traits
 
 The final stage links gene-family copy-number change to convergent phenotypes
 using a **RERconverge**-based branch-association approach, then produces summary
@@ -308,6 +425,8 @@ default plus a safety margin works out of the box.
   name them meaningfully (`Homo_sapiens.fa`, `Felis_catus.fa`, …).
 - *(Optional)* Your own species tree in Newick format, and/or one or more
   divergence-time calibrations — supplied during `convgeno init`.
+- A **phenotype table** (TSV: one column of tip labels, one of the
+  phenotype) — supplied during `convgeno init` to build the phenotype tree.
 
 **What you get** (in `orthofinder.output_dir`):
 
@@ -315,6 +434,9 @@ default plus a safety margin works out of the box.
   species tree, and comparative-genomics statistics.
 - `species_tree_ultrametric.nwk` — the time-calibrated species tree (when r8s is
   installed), plus `r8s_work/` with the control file and r8s log.
+- `lambda_tree.nwk` + `lambda_legend.tsv` — the categorical phenotype tree (the
+  CAFE `-y` multi-λ tree) and its integer↔trait-state key (when you supplied
+  phenotype data).
 - A gene-family count matrix suitable for CAFE-5.
 
 ---
@@ -349,6 +471,12 @@ ultrametric:                 # the r8s dating step (from your init answers)
   divergence_my: 94.0
   smoothing: 100             # higher = closer to a strict molecular clock
 
+phenotype_tree:              
+  table: Data/phenotypes.tsv # tip labels + phenotype; presence enables the step
+  id_col: species            # column of tip labels (= proteome basenames)
+  pheno_col: phenotype       # column of trait states
+  model: ER                  # ancestral-reconstruction model: ER | SYM | ARD
+
 multinode:                   # OPTIONAL — every knob auto-derives if omitted
   throughput_const: 6.055387e11   # from the throughput-calibration kit
 ```
@@ -366,11 +494,16 @@ age windows — see the
 | Command | What it does |
 |---|---|
 | `convgeno init [--output PATH]` | Interactive first-time setup; writes `pipeline_config.yaml`. |
+| `convgeno run [-n] [--local] [--mode …] [--jobs N] [-y]` | Run the **whole pipeline** as a DAG (clean → OrthoFinder → trees → CAFE-5). |
+| `convgeno clean [<raw> <cleaned>] [--config …]` | Longest-isoform filtering (pipeline step 1); config- or arg-driven. |
 | `convgeno orthofinder generate [--mode …] [--config …] [--script-dir …]` | Write the OrthoFinder SLURM script(s) **without** submitting. |
-| `convgeno orthofinder run [--mode …] [-y] [--config …] [--script-dir …]` | Write **and** submit the OrthoFinder job(s). |
-| `python Src/Loc/scripts/filter_isoforms.py dir <in> <out>` | Batch longest-isoform filtering (directory of proteomes). |
+| `convgeno orthofinder run [--mode …] [--wait] [-y] [--config …]` | Write **and** submit the OrthoFinder job(s); `--wait` blocks until done. |
+| `python Src/Loc/scripts/filter_isoforms.py dir <in> <out>` | Lower-level batch longest-isoform filtering (directory of proteomes). |
 | `python Src/Loc/scripts/filter_isoforms.py files -i <in…> -o <out>` | Longest-isoform filtering from one or more files into one FASTA. |
 | `python Src/Loc/scripts/make_tree_ultrametric.py …` | Run the r8s dating step by hand (normally automatic). |
+| `Rscript Src/Loc/scripts/make_categorical_phenotype_tree.R …` | Build the categorical phenotype tree (CAFE `-y`) by hand (normally automatic). |
+| `python Src/Loc/scripts/prepare_cafe_inputs.py …` | Build the CAFE-5 count matrix + tree by hand (normally automatic). |
+| `python Src/Loc/scripts/run_cafe.py …` | Run CAFE-5 by hand (normally the final step of `convgeno run`). |
 
 `convgeno` (no arguments) prints help. See [Usage](#usage) for the full flag
 lists.
@@ -387,6 +520,7 @@ lists.
 | Choosing / supplying the species tree | [`docs/species_tree/species_tree.md`](docs/species_tree/species_tree.md) |
 | Divergence-time calibration (r8s) | [`docs/r8s/divergence-time-calibration.md`](docs/r8s/divergence-time-calibration.md) |
 | Installing r8s from source | [`tools/r8s/README.md`](tools/r8s/README.md) |
+| Installing the R packages | [`tools/r-deps/README.md`](tools/r-deps/README.md) |
 | Calibrating the DIAMOND throughput constant | [`tools/throughput-constant/README.md`](tools/throughput-constant/README.md) |
 
 ---

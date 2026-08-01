@@ -32,9 +32,9 @@ VGP, etc.) that informed the phenotype assignments or species selection.
 
 ## Verification
 
-After populating this directory, run:
+After populating this directory, configure the run and preview the pipeline
+without submitting anything:
 ```bash
-python Src/Loc/scripts/validate_inputs.py \
-    --config Src/Loc/configs/example_config.yaml \
-    --tools  Src/Loc/configs/tool_paths.yaml
+convgeno init          # point it at your raw proteomes here
+convgeno run -n        # dry run: prints the planned DAG (clean → OrthoFinder → CAFE-5)
 ```

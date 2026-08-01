@@ -1,0 +1,15 @@
+# The pipeline is developed on Windows but runs on a Linux SLURM cluster.
+# Force LF for everything that a Linux interpreter executes or reads as a
+# script: CRLF in a shell script breaks the `#!/usr/bin/env bash` shebang, and
+# CRLF in SLURM/Snakemake files causes obscure runtime failures. This holds
+# regardless of any contributor's core.autocrlf setting.
+*.sh        text eol=lf
+*.sbatch    text eol=lf
+*.smk       text eol=lf
+Snakefile   text eol=lf
+*.py        text eol=lf
+*.R         text eol=lf
+*.r         text eol=lf
+*.nwk       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
